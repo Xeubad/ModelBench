@@ -17,6 +17,22 @@ ModelBench 不是"跑一遍看谁快"的压测脚本，而是一台**带统计�
 
 ---
 
+## 致敬
+
+本项目的**模型指纹（数值分布对账）**，思路来自两个优秀的开源项目，特此致谢：
+
+- **[ModelTrace](https://github.com/xqy2006/ModelTrace)**（[@xqy2006](https://github.com/xqy2006)，MIT）
+  用无语义数值生成挑战提取输出指纹，Hellinger 数字分布 + 有序块特征，投影掉环境干扰方向后做闭集归因。
+- **[meow-llm-detector](https://github.com/chen-006/meow-llm-detector)**（[@chen-006](https://github.com/chen-006)，PolyForm Noncommercial 1.0.0）
+  用短问题的回答分布做行为指纹，以 Dirichlet-multinomial 证据累积打分，并坚持"证据不足就拒判"。
+
+两个项目对"如何从输出分布判断模型身份"都做出了很有价值的探索。ModelBench 只借鉴了它们的
+**方法与统计思想**（数值挑战 → 分布特征 → 距离/证据判定 → 可拒判），**未复制任何代码**；
+挑战设计、分箱与判定线均按本项目的样本量和假服务自检重新实现，并明确标注"指纹是启发式证据，
+不是身份认证"。如果你要做严格的模型归因，请直接使用上面两个项目。
+
+---
+
 ## 特性
 
 - **零依赖**：只用 Python 标准库（`http.client` + `http.server`），不装任何包，离线可用。
