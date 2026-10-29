@@ -1,0 +1,27 @@
+{
+  "_说明": "只需写想改的项，其余沿用默认；路径相对于 ModelBench 目录，~ 展开为用户目录；改完重启 start.sh 生效。server.bind_hosts 第一个必须是本机；需要局域网/组网访问时再追加自己的地址（如 \"10.x.x.x\"），绑定失败会自动跳过。完整说明见 model_test/config.py",
+  "server": {
+    "port": 18888,
+    "bind_hosts": [
+      "127.0.0.1"
+    ]
+  },
+  "limits": {
+    "max_prompt": 2000,
+    "max_rounds": 20,
+    "max_timeout": 300,
+    "max_requests": 1200,
+    "max_body": 400000
+  },
+  "defaults": {
+    "rounds": 5,
+    "timeout": 90,
+    "gap": 1.5
+  },
+  "paths": {
+    "data_dir": "data",
+    "results_dir": "results",
+    "legacy_results_dir": "~/.openclaw/logs/model-bench",
+    "openclaw_config": "~/.openclaw/openclaw.json"
+  }
+}

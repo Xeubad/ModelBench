@@ -1,0 +1,22 @@
+# 接口地址与明文密钥 —— 绝不进 git
+data/endpoints.json
+
+# 每次测试的结果（含真实接口的完整回答、raw 流事件，体积大且是本机资产）
+results/
+results/.trash/
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# 本机临时脚本：依赖 ~/.openclaw/openclaw.json，含个人服务商与模型列表，不入公开仓库
+adhoc/
+
+# 个人待办（含本机路径与其他项目引用）
+.pi/
+
+# 本机工作配置（含内网监听地址与本机 OpenClaw 路径）；模板用 config.example.json
+config.json

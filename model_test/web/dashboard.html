@@ -1,0 +1,1094 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模型测试平台 · ModelBench</title>
+<style>
+/* ============================================================
+   视觉方向：安静的机房（Quiet Machine Room）
+   深色仪器面板美学——示波器/频谱仪，不是 SaaS 卡片墙。
+   - 墨蓝近黑底 + 细网格 + 极淡扫描线，营造 CRT 余晖
+   - 唯一强调色：琥珀荧光（amber），像老式示波器的迹线
+   - 数字一律用等宽字体，读数对齐；中文用无衬线
+   - 边框是 1px 暗线，分隔靠留白和字重，不靠投影
+   ============================================================ */
+:root{
+  --bg:#0a0d12; --bg2:#0e1219; --panel:#111621; --panel2:#151b28;
+  --line:#1e2634; --line2:#2a3547;
+  --ink:#dce3ed; --ink2:#9aa7bb; --mute:#6b7789;
+  --amber:#ffb454; --amber2:#ffcf8a; --amber-dim:rgba(255,180,84,.14);
+  --cyan:#5ad1d0; --green:#5ed68f; --red:#ff6b6b; --violet:#a78bfa;
+  --mono:"SF Mono",ui-monospace,"JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans SC","Helvetica Neue",sans-serif;
+}
+*{box-sizing:border-box}
+::-webkit-scrollbar{width:11px;height:11px;background:transparent}
+::-webkit-scrollbar-track,::-webkit-scrollbar-corner{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(120,140,170,.28);border-radius:10px;border:3px solid transparent;background-clip:padding-box}
+::-webkit-scrollbar-thumb:hover{background:rgba(255,180,84,.45);background-clip:padding-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--ink);font:13.5px/1.6 var(--sans);
+  -webkit-font-smoothing:antialiased;
+  /* 细网格 + 顶部微光：机房墙面的感觉 */
+  background-image:
+    radial-gradient(1200px 500px at 70% -10%, rgba(255,180,84,.055), transparent 70%),
+    linear-gradient(rgba(255,255,255,.016) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.016) 1px, transparent 1px);
+  background-size:100% 100%, 44px 44px, 44px 44px;
+  background-attachment:fixed;
+}
+::selection{background:rgba(255,180,84,.28);color:#fff}
+
+.app{display:grid;grid-template-columns:clamp(370px,27vw,470px) 1fr;height:100vh}
+.left{display:flex;flex-direction:column;background:linear-gradient(180deg,var(--bg2),var(--bg));border-right:1px solid var(--line);min-height:0;position:relative}
+.left::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:repeating-linear-gradient(180deg,transparent 0 3px,rgba(255,255,255,.011) 3px 4px)}
+.left .scroll{flex:1;overflow:auto;padding:20px 22px 12px;position:relative;z-index:1}
+.left .foot{border-top:1px solid var(--line);padding:14px 22px 16px;background:var(--panel);position:relative;z-index:1}
+.right{overflow:auto;padding:20px 28px 72px;min-width:0}
+@media(max-width:920px){.app{grid-template-columns:1fr;height:auto}.left{border-right:0;border-bottom:1px solid var(--line)}.left .scroll{overflow:visible}}
+
+/* ---------- 标题层级 ---------- */
+h1{margin:0 0 2px;font-size:17px;letter-spacing:.4px;display:flex;align-items:baseline;gap:9px}
+h1 .wordmark{font-family:var(--mono);font-weight:600;color:var(--amber);letter-spacing:.5px}
+h1 small{color:var(--mute);font-weight:400;font-size:11.5px;font-family:var(--mono)}
+h2{margin:26px 0 11px;font-size:11.5px;letter-spacing:1.6px;text-transform:uppercase;color:var(--ink2);
+   display:flex;align-items:center;gap:9px;font-weight:600}
+h2::before{content:"";width:5px;height:5px;background:var(--amber);border-radius:50%;box-shadow:0 0 7px var(--amber);flex:none}
+h2:first-child{margin-top:4px}
+h2 .sp{flex:1}
+h3{margin:18px 0 10px;font-size:12px;letter-spacing:.8px;color:var(--ink2);text-transform:uppercase}
+
+/* ---------- 表单控件 ---------- */
+label.f{display:block;font-weight:500;margin:13px 0 5px;font-size:11px;letter-spacing:.9px;color:var(--mute);text-transform:uppercase}
+input[type=text],input[type=password],input[type=number],textarea,select{
+  width:100%;padding:7px 10px;border:1px solid var(--line2);border-radius:3px;background:#0b0f16;color:var(--ink);
+  font:13px/1.5 var(--sans);transition:border-color .15s, box-shadow .15s}
+input[type=number]{font-family:var(--mono);width:74px}
+textarea{min-height:64px;resize:vertical;font-family:var(--mono);font-size:12px}
+select{font-family:var(--mono);font-size:12px;cursor:pointer}
+input:focus,textarea:focus,select:focus{outline:0;border-color:var(--amber);box-shadow:0 0 0 3px var(--amber-dim)}
+input::placeholder,textarea::placeholder{color:#4d586a}
+button{padding:7px 15px;border:1px solid transparent;border-radius:3px;background:var(--amber);color:#1a1206;
+  font:inherit;font-weight:650;cursor:pointer;letter-spacing:.2px;transition:filter .12s, background .12s, border-color .12s}
+button:hover:not(:disabled){filter:brightness(1.12)}
+button:active:not(:disabled){transform:translateY(.5px)}
+button.ghost{background:transparent;border-color:var(--line2);color:var(--ink2)}
+button.ghost:hover:not(:disabled){border-color:var(--amber);color:var(--amber);background:var(--amber-dim)}
+button.sm{padding:3px 10px;font-size:11.5px;font-weight:500;border-radius:2px}
+button.danger{background:transparent;border-color:rgba(255,107,107,.45);color:var(--red)}
+button.danger:hover:not(:disabled){background:rgba(255,107,107,.13);border-color:var(--red)}
+button:disabled{opacity:.4;cursor:default}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{
+  outline:2px solid var(--amber);outline-offset:2px}
+button.big{padding:10px 24px;font-size:14px;letter-spacing:.4px}
+
+.row{display:flex;flex-wrap:wrap;gap:7px 15px;align-items:center;margin-top:9px}
+.ep{border:1px solid var(--line);border-left:3px solid var(--line2);border-radius:4px;padding:12px 13px;margin-bottom:10px;
+    background:var(--panel);transition:border-color .15s}
+.ep:hover{border-left-color:var(--amber);background:var(--panel2)}
+.ep .nm{font-weight:650;font-family:var(--mono);font-size:12.5px}
+.ep .url{color:var(--mute);font-size:11px;word-break:break-all;font-family:var(--mono);margin-top:3px}
+.ep .btns{display:flex;gap:7px;margin-top:10px;flex-wrap:wrap}
+.form{border:1px dashed var(--amber);border-radius:3px;padding:11px 13px;margin-bottom:10px;background:rgba(255,180,84,.04)}
+.models{max-height:250px;overflow:auto;border:1px solid var(--line);border-radius:4px;padding:9px 12px;background:#0b0f16}
+.models .grp{display:flex;align-items:center;gap:7px;margin-top:9px;font-weight:600;font-size:11px;
+  color:var(--amber2);font-family:var(--mono);letter-spacing:.5px}
+.models .grp:first-child{margin-top:0}
+.models label{display:flex;gap:6px;align-items:center;margin:1px 0;font-weight:400;font-family:var(--mono);font-size:11.5px;color:var(--ink2)}
+.chk{display:flex;gap:8px;align-items:center;margin:5px 0}
+.chk span{color:var(--mute);font-size:11px;font-family:var(--mono)}
+input[type=checkbox]{width:15px;height:15px;accent-color:var(--amber);cursor:pointer;flex:none}
+.presets{display:flex;flex-wrap:wrap;gap:6px}
+.presets button{margin:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 auto}
+.bar{height:5px;background:var(--line);border-radius:3px;overflow:hidden;margin:8px 0 3px}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--amber),var(--amber2));
+  box-shadow:0 0 9px rgba(255,180,84,.55);transition:width .3s}
+
+/* ---------- 标签页 ---------- */
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:18px}
+.tabs button{background:none;color:var(--mute);border-radius:0;border-bottom:2px solid transparent;
+  padding:10px 19px;font-weight:500;font-size:13px;letter-spacing:.3px;position:relative}
+.tabs button:hover:not(.on){color:var(--ink2)}
+.tabs button.on{color:var(--amber);border-bottom-color:var(--amber)}
+.tabs button.on::after{content:"";position:absolute;left:17px;right:17px;bottom:-2px;height:2px;
+  background:var(--amber);box-shadow:0 0 10px var(--amber)}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 14px}
+.chips button{background:transparent;border-color:var(--line2);color:var(--ink2);font-weight:500;
+  padding:5px 15px;border-radius:3px;font-size:12px;font-family:var(--mono)}
+.chips button:hover:not(.on){border-color:var(--amber);color:var(--amber)}
+.chips button.on{background:var(--amber);border-color:var(--amber);color:#1a1206}
+
+/* ---------- 卡片：加大留白，主数字更突出 ---------- */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--green);border-radius:4px;
+  padding:16px 18px;position:relative;overflow:hidden;transition:border-color .15s,transform .15s}
+.card:hover{transform:translateY(-1px)}
+.card.warn{border-left-color:var(--amber)}.card.bad{border-left-color:var(--red)}
+.card::before{content:"";position:absolute;top:0;right:0;width:80px;height:80px;pointer-events:none;
+  background:radial-gradient(circle at top right, rgba(255,255,255,.05), transparent 70%)}
+.card b{font-size:12.5px;word-break:break-all;font-family:var(--mono);color:var(--ink)}
+.card .big{font-size:28px;font-weight:700;margin:6px 0 4px;font-family:var(--mono);letter-spacing:-.5px;color:var(--amber2)}
+.card .ln{color:var(--mute);font-size:12px;font-family:var(--mono);line-height:1.75}
+.card .ln b{color:var(--ink);font-size:12px;font-weight:600}
+.tag{display:inline-block;padding:1px 9px;border-radius:2px;font-size:11px;background:rgba(255,255,255,.05);
+  margin:0 5px 4px 0;font-family:var(--mono);letter-spacing:.3px;border:1px solid var(--line2);color:var(--ink2)}
+.tag.bad{background:rgba(255,107,107,.12);border-color:rgba(255,107,107,.4);color:#ff9b9b}
+.tag.warn{background:rgba(255,180,84,.12);border-color:rgba(255,180,84,.4);color:var(--amber2)}
+.tag.ok{background:rgba(94,214,143,.12);border-color:rgba(94,214,143,.4);color:#8fe3b0}
+
+/* ---------- 面板 ---------- */
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:20px 22px;margin-top:18px}
+.panel>h3:first-child{margin-top:0}
+.concl{background:linear-gradient(180deg,rgba(255,180,84,.07),rgba(255,180,84,.03));
+  border:1px solid rgba(255,180,84,.22);border-left:3px solid var(--amber);border-radius:4px;
+  padding:16px 20px;margin:0 0 18px;white-space:pre-line;font-family:var(--mono);font-size:12.5px;line-height:1.9}
+
+/* ---------- 表格：放宽行高与字号，读数更透气 ---------- */
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{padding:9px 11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{color:var(--mute);font-weight:600;white-space:nowrap;font-size:10.5px;letter-spacing:.9px;text-transform:uppercase;
+   font-family:var(--mono);border-bottom-color:var(--line2);padding-bottom:11px}
+tbody tr:hover{background:rgba(255,255,255,.022)}
+.nw td{white-space:nowrap}
+td{font-family:var(--mono);font-size:12px;color:var(--ink2);line-height:1.6}
+.ok{color:var(--green)}.err{color:var(--red)}.mute{color:var(--mute)}.hidden{display:none!important}
+/* 图表区：每个图各占一整行、拉高，便于读数（不再两列挤在一起） */
+.charts{display:flex;flex-direction:column;gap:22px}
+.charts .panel{padding:22px 24px}
+svg text{fill:var(--ink2);font-size:11.5px;font-family:var(--mono)}svg .m{fill:var(--mute)}
+details summary{cursor:pointer;color:var(--amber2);font-size:12px}
+details summary:hover{color:var(--amber)}
+.msg{font-size:11.5px;margin-top:7px;font-family:var(--mono);line-height:1.7}
+/* 下载按钮：次级操作，幽灵样式 + 等宽字体 */
+.btn-dl{display:inline-flex;align-items:center;gap:6px;margin-left:auto;padding:6px 14px;font-family:var(--mono);
+  font-size:11.5px;letter-spacing:.3px;color:var(--ink2);text-decoration:none;border:1px solid var(--line2);border-radius:3px;
+  background:var(--panel);transition:border-color .15s,color .15s,background .15s}
+.btn-dl:hover{border-color:var(--amber);color:var(--amber);background:var(--amber-dim)}
+
+/* ---------- 历史表 ---------- */
+.hist tr{cursor:pointer}
+.hist th,.hist td{padding:9px 11px;font-size:12.5px;vertical-align:middle}
+.hist td.cell-chk{padding:0;width:64px;text-align:center}
+.hist .hit{display:flex;align-items:center;justify-content:center;min-height:46px;cursor:pointer}  /* 整个单元格都是点击区 */
+.hist input[type=checkbox]{width:22px;height:22px;margin:0;accent-color:var(--amber);cursor:pointer}
+.hist tr.sel{background:rgba(255,180,84,.09);box-shadow:inset 3px 0 0 var(--amber)}
+.hist .acts{white-space:nowrap;width:1%}  /* 只放一个删除按钮，列宽收到最小 */
+.hist .acts button{min-height:34px;padding:6px 16px;font-size:12.5px;font-family:var(--mono)}
+pre{white-space:pre-wrap;word-break:break-all;font-size:12px;margin:10px 0 0;font-family:var(--mono);color:var(--ink2);line-height:1.7}
+.mx td,.mx th{text-align:center}.mx td:first-child,.mx th:first-child{text-align:left}
+.cell-ok{background:rgba(94,214,143,.14);color:#8fe3b0}
+.cell-bad{background:rgba(255,107,107,.14);color:#ff9b9b}
+.cell-mid{background:rgba(255,180,84,.14);color:var(--amber2)}
+.best{font-weight:700;color:var(--green)}
+th.sortable{cursor:pointer;user-select:none}
+th.sortable:hover{color:var(--amber)}
+.warnbox{background:rgba(255,180,84,.09);border:1px solid rgba(255,180,84,.3);border-left:3px solid var(--amber);
+  color:var(--amber2);border-radius:4px;padding:14px 18px;margin:14px 0;font-size:12.5px;line-height:1.85}
+.infobox{background:var(--panel2);border:1px solid var(--line2);border-radius:4px;padding:14px 18px;margin:14px 0;font-size:12.5px;color:var(--ink2);line-height:1.8}
+.fast{color:var(--green);font-weight:650}.slow{color:var(--red);font-weight:650}.same{color:var(--mute)}
+.seg{display:inline-flex;gap:0;border:1px solid var(--line2);border-radius:4px;overflow:hidden}
+.seg button{background:transparent;color:var(--mute);border-radius:0;font-weight:500;padding:6px 16px;font-family:var(--mono);font-size:12px}
+.seg button.on{background:var(--amber);color:#1a1206}
+.cmpbar{position:sticky;top:0;z-index:3;display:flex;gap:11px;align-items:center;flex-wrap:wrap;
+  background:rgba(255,180,84,.08);border:1px solid rgba(255,180,84,.35);border-radius:3px;padding:11px 14px;margin:9px 0;
+  backdrop-filter:blur(6px)}
+.runs{display:grid;grid-template-columns:repeat(auto-fill,minmax(252px,1fr));gap:11px;margin-top:9px}
+.runcard{border:1px solid var(--line);border-radius:3px;padding:10px 12px;font-size:12px;background:var(--panel2)}
+.runcard.base{border-color:var(--amber);background:rgba(255,180,84,.07)}
+.runcard b{font-size:16px;color:var(--amber);font-family:var(--mono)}
+.legend ul{margin:7px 0 0 19px;padding:0}.legend li{margin:3px 0;font-size:12px;color:var(--ink2)}
+.empty-note{padding:6px 2px 2px;line-height:1.8}
+.empty-note code{font-family:var(--mono);font-size:11px;background:var(--panel2);border:1px solid var(--line2);border-radius:2px;padding:1px 5px;color:var(--amber2)}
+.verdict{border-left:3px solid var(--amber);background:linear-gradient(180deg,rgba(255,180,84,.08),rgba(255,180,84,.02));
+  border-radius:3px;padding:13px 17px;margin-top:13px;white-space:pre-line;line-height:1.8;font-family:var(--mono);font-size:12px}
+.verdict .head{font-size:12px;font-weight:700;margin-bottom:6px;color:var(--amber);letter-spacing:1.4px;text-transform:uppercase}
+.cmptbl th,.cmptbl td{text-align:center}.cmptbl td:first-child,.cmptbl th:first-child{text-align:left}
+.cmpcell{min-width:124px}.cmpcell .v{font-weight:700;font-size:14px;color:var(--ink)}
+.cmpcell .d{font-size:11.5px;font-weight:650}.cmpcell .t{font-size:10.5px;color:var(--mute)}
+.cmpcell.better{background:rgba(94,214,143,.13)}.cmpcell.better .d{color:var(--green)}
+.cmpcell.worse{background:rgba(255,107,107,.12)}.cmpcell.worse .d{color:var(--red)}
+.cmpcell.base{background:rgba(255,180,84,.1)}.cmpcell.same .d,.cmpcell.unk .d{color:var(--mute)}
+.fl{animation:flash 1.6s}
+@keyframes flash{0%,60%{box-shadow:0 0 0 3px var(--amber)}100%{box-shadow:none}}
+
+/* ---------- 入场动效：示波器上电 ---------- */
+@keyframes sweep{from{transform:scaleX(0);opacity:1}to{transform:scaleX(1);opacity:0}}
+.boot{position:fixed;inset:0;background:var(--bg);z-index:99;display:flex;align-items:center;justify-content:center;
+  flex-direction:column;gap:16px;animation:bootout .5s ease 1.05s forwards}
+.boot .line{width:min(320px,60vw);height:1px;background:var(--amber);box-shadow:0 0 12px var(--amber);
+  transform-origin:left;animation:sweep .9s cubic-bezier(.2,.7,.3,1) .12s both}
+.boot .txt{font-family:var(--mono);font-size:11px;color:var(--amber);letter-spacing:3px;text-transform:uppercase}
+@keyframes bootout{to{opacity:0;visibility:hidden}}
+.app{animation:fadein .5s ease .95s both}
+@keyframes fadein{from{opacity:0}to{opacity:1}}
+@media(prefers-reduced-motion:reduce){
+  .boot,.app{animation:none}.boot{display:none}.card:hover{transform:none}
+}
+</style>
+</head>
+<body>
+<div class="boot"><div class="txt">ModelBench</div><div class="line"></div></div>
+<div class="app">
+<aside class="left">
+  <div class="scroll">
+    <h1><span class="wordmark">ModelBench</span><small id="ver"></small></h1>
+
+    <h2>接口 <span class="sp"></span><button class="ghost sm" id="addEp">＋ 添加</button><button class="ghost sm" id="impEp" title="只读取 OpenClaw 配置里的供应商，复制到本平台">导入</button></h2>
+    <div id="epForm" class="form hidden">
+      <input type="hidden" id="f_id">
+      <label class="f">名称</label><input type="text" id="f_name" placeholder="例如 codeapi">
+      <label class="f">接口地址 Base URL</label><input type="text" id="f_url" placeholder="https://xxx.com 或 https://xxx.com/v1">
+      <label class="f">密钥 API Key <span id="f_keyhint" class="mute"></span></label><input type="password" id="f_key" autocomplete="off" placeholder="sk-…">
+      <label class="f">接口类型</label>
+      <select id="f_api"><option value="auto">自动探测</option><option value="responses">responses（/v1/responses）</option><option value="chat">chat（/v1/chat/completions）</option></select>
+      <label class="f">模型（每行一个，保存后自动探测并覆盖；也可手填）</label><textarea id="f_models"></textarea>
+      <div class="row"><button id="f_save">保存并探测</button><button class="ghost" id="f_cancel">取消</button></div>
+      <div class="msg" id="f_msg"></div>
+    </div>
+    <div id="eps" class="mute">加载中…</div>
+    <div class="msg" id="epMsg"></div>
+
+    <h2>测试场景</h2>
+    <div id="scen"></div>
+    <div id="speedBox">
+      <label class="f">自定义提示词（速度场景用）</label>
+      <textarea id="prompt">只回复：好</textarea>
+      <div class="presets" id="presets"></div>
+      <div class="row"><span style="color:var(--mute);font-size:11.5px;font-family:var(--mono)">背景文字</span>
+        <select id="context" style="width:auto" title="在提示词前加一段背景文字，模拟长对话"><option value="0">无</option><option value="10000">约 1 万 tokens</option><option value="30000">约 3 万 tokens</option></select></div>
+    </div>
+
+    <h2>模型 <span class="sp"></span><span class="mute" id="selcount" style="font-family:var(--mono);font-size:11px"></span><input type="text" id="mfilter" placeholder="筛选" style="width:88px;margin-left:auto"></h2>
+    <div class="models" id="models"><span class="mute">先添加接口</span></div>
+
+    <h2>参数</h2>
+    <div class="row" style="margin-top:0">
+      <span style="font-size:11.5px;font-family:var(--mono);color:var(--ink2)">轮数 <input type="number" id="rounds" value="5" min="1" max="10" title="每个模型×题目测几轮；少于 5 轮会标“样本不足”"></span>
+      <span style="font-size:11.5px;font-family:var(--mono);color:var(--ink2)">超时 <input type="number" id="timeout" value="90" min="10" max="300"> 秒</span>
+      <span style="font-size:11.5px;font-family:var(--mono);color:var(--ink2)">间隔 <input type="number" id="gap" value="1.5" min="0" max="10" step="0.5"> 秒</span>
+    </div>
+    <div class="row"><span style="font-size:11.5px;font-family:var(--mono);color:var(--ink2)">推理强度</span>
+      <select id="effort" style="width:auto" title="比较思考型和非思考型模型时，建议统一强度，否则耗时差来自“思考多久”而不是网络"><option value="">不指定（模型默认）</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></div>
+    <div class="chk"><input type="checkbox" id="warmup" checked><label for="warmup" style="font-size:11.5px;color:var(--ink2)">每个模型先预热一次（不计入结果）</label></div>
+    <div class="chk"><input type="checkbox" id="useName"><label for="useName" style="font-size:11.5px;color:var(--ink2)">自定义测试名称（方便以后按名字找文件）</label></div>
+    <input type="text" id="runName" class="hidden" maxlength="30" placeholder="例如 AB平台对比（中文、字母、数字、-、_）">
+    <div class="msg mute hidden" id="nameHint"></div>
+    <div class="mute" style="font-size:11px;margin-top:7px;line-height:1.7">每一轮把“全部模型 × 全部题目”随机打乱顺序再发；同一接口两次请求之间留间隔，避免限流。</div>
+  </div>
+  <div class="foot">
+    <div class="row" style="margin-top:0"><button id="run">开始测试</button><button id="stop" class="ghost hidden">停止</button><span class="mute" id="est" style="font-family:var(--mono);font-size:11px"></span></div>
+    <div class="err msg" id="runErr"></div>
+    <div id="progress" class="hidden"><div class="bar"><i id="pgBar" style="width:0"></i></div><div class="msg"><b id="pgText" style="font-family:var(--mono)"></b> <span class="mute" id="pgCur"></span></div></div>
+  </div>
+</aside>
+
+<main class="right">
+  <div class="tabs"><button data-tab="result" class="on">结果</button><button data-tab="history">历史与趋势</button><button data-tab="compare">对比</button><button data-tab="merge">合并检验</button><button data-tab="selftest">仪器自检</button></div>
+
+  <div id="tab-result">
+    <div id="empty" class="panel mute">还没有结果。左侧选好接口、场景和模型，点“开始测试”；或到“历史与趋势”里打开以前的结果。</div>
+    <div id="result" class="hidden">
+      <div class="row" style="margin-top:0">
+        <b id="resTitle" style="font-size:15px;font-family:var(--mono);letter-spacing:.3px"></b>
+        <a id="resDl" class="btn-dl hidden" href="#" download title="下载这一次测试的原始数据（含全部流事件）">↓ 下载原始数据</a>
+      </div>
+      <div class="concl" id="concl"></div>
+      <div class="warnbox hidden" id="sampleHint"></div>
+      <div class="chips" id="scChips"></div>
+      <div class="row" style="margin:0 0 9px"><span class="seg" id="viewSeg"><button data-v="table" class="on">总表</button><button data-v="cards">卡片</button></span><span class="mute" id="tblNote" style="font-size:11px"></span></div>
+      <div id="tblWrap" style="overflow:auto"><table id="tbl" class="nw"></table></div>
+      <div class="cards hidden" id="cards"></div>
+      <div class="charts" style="margin-top:13px">
+        <div class="panel"><h3 style="margin-top:0" id="segTitle">分段耗时（中位数）</h3><div id="chartSeg"></div></div>
+        <div class="panel"><h3 style="margin-top:0">每次请求的总耗时（红 × 为失败）</h3><div id="chartDots"></div></div>
+        <div class="panel hidden" id="scPanel"><h3 style="margin-top:0">正确率 — 总耗时（越靠左上越好；竖线 = 95% 区间）</h3><div id="chartSc"></div></div>
+      </div>
+      <div class="panel hidden" id="mxPanel"><h3 style="margin-top:0">题目 × 模型 正确情况</h3><div style="overflow:auto"><table class="mx" id="matrix"></table></div></div>
+      <div class="panel hidden" id="fpPanel"><h3 style="margin-top:0">模型指纹（数值分布对账）</h3><div id="fp"></div></div>
+      <div class="panel"><h3 style="margin-top:0">状态码分布</h3><div id="codes"></div></div>
+      <div class="panel"><h3 style="margin-top:0">测试环境快照</h3><div id="env" class="mute"></div></div>
+      <div class="panel"><h3 style="margin-top:0">明细</h3><div style="overflow:auto"><table id="detail" class="nw"></table></div><div class="mute" id="detailNote" style="font-size:11px;margin-top:5px;line-height:1.7"></div></div>
+    </div>
+  </div>
+
+  <div id="tab-history" class="hidden">
+    <div class="panel"><div class="row" style="margin-top:0"><b style="font-size:12px;letter-spacing:1.4px;text-transform:uppercase;color:var(--ink2)">趋势</b>
+      <select id="trendSc" style="width:auto"></select><select id="trendCond" style="width:auto;max-width:60%" title="只比较条件完全相同的结果（推理强度、提示词、背景长度）"></select><span class="mute" id="trendNote" style="font-size:11px"></span></div><div id="trend" class="mute" style="margin-top:9px">暂无历史</div></div>
+    <div class="panel"><div class="row" style="margin-top:0"><b style="font-size:12px;letter-spacing:1.4px;text-transform:uppercase;color:var(--ink2)">历史测试</b><span class="mute" style="font-size:11px">（每次一个文件夹：results/日期-次数[_名称]/）</span></div>
+      <div class="cmpbar"><button id="cmpBtn" class="big" disabled>对比所选（至少选 2 条）</button><button class="ghost" id="cmpAll">全选</button><button class="ghost hidden" id="cmpClear">清空选择</button><button class="ghost" id="mergeBtn" disabled title="把条件相同的多次测试合并，用更大样本重算统计">合并所选（提高样本量）</button><span class="mute" id="cmpInfo" style="font-size:11.5px"></span></div>
+      <div class="mute" style="font-size:11.5px;margin:3px 0 5px">点任意一行直接打开结果；勾选左侧大方框把它加入对比。</div>
+      <div style="overflow:auto;max-height:55vh;margin-top:7px"><table id="history" class="hist nw"></table></div></div>
+  </div>
+
+  <div id="tab-compare" class="hidden">
+    <div id="cmpEmpty" class="panel mute">到“历史与趋势”里勾选两条结果，点“对比所选”。第一条是 A，第二条是 B。</div>
+    <div id="cmpBody"></div>
+  </div>
+
+  <div id="tab-merge" class="hidden">
+    <div id="mergeEmpty" class="panel mute">
+      <b style="color:var(--ink2)">合并检验：把多次测试的样本合起来算，提高检验力</b>
+      <div style="margin-top:8px;line-height:1.9">
+        单次测试受“轮数上限”限制，每组样本往往只有十几个，真实差距 30% 以内很难检出“显著”。
+        把<b>条件相同</b>的多次测试合并后，样本量翻倍，同样一套统计就能给出更可靠的结论。<br>
+        用法：到“历史与趋势”里勾选 2 条以上结果，点“合并所选”。<br>
+        <span class="mute">只有推理强度、提示词/背景、采样参数都相同的结果才会被合并；条件不同的会分开统计并注明。</span>
+      </div>
+    </div>
+    <div id="mergeBody"></div>
+  </div>
+
+  <div id="tab-selftest" class="hidden">
+    <div class="panel"><b style="font-size:12px;letter-spacing:1.4px;text-transform:uppercase;color:var(--ink2)">仪器自检</b>
+      <p class="mute" style="margin:5px 0 10px;font-size:12px;line-height:1.75">在本机起一个假模型服务，故意设定延迟（0.5s、2s）、故障（503/504/429…）、工具调用，验证平台测出的时间误差在 ±50ms 内、状态码分类正确、判分器和交替顺序正确。约 10 秒，不访问任何真实接口。测试运行期间不可用。</p>
+      <button id="stRun">运行自检</button><div id="stOut" style="margin-top:11px"></div></div>
+  </div>
+</main>
+</div>
+<script>
+
+"use strict";
+const $ = id => document.getElementById(id);
+const COLORS = ["#ffb454","#5ad1d0","#5ed68f","#ff6b6b","#a78bfa","#38bdf8","#f472b6","#a3e635","#94a3b8"];
+const HINTS = {503:"中转站没有可用线路/账号",504:"中转站前面的代理等不到模型",429:"超过每分钟请求数限制",401:"密钥无效",404:"没有这个模型/路径",400:"请求被拒（格式/参数）",502:"上游不可用","无响应":"连接超时或断开"};
+const PRESETS = ["只回复：好","用一句话介绍你自己","用 200 字说明什么是投标文件的资格审查","把“2,520,000.00 元”改写成中文大写金额"];
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const sec = v => v == null ? "-" : v.toFixed(2) + "s";
+const pf = v => v == null ? "-" : Math.round(v * 100) + "%";
+const ciText = c => c ? `${pf(c[0])}–${pf(c[1])}` : "";
+const SEP = "\u0001";
+let cfg = {scenarios: {}, tasks_per_scenario: {}}, endpoints = [], selected = new Set(), chosenSc = new Set(["speed"]);
+let polling = null, view = null, viewSc = null, historyRuns = [], lastSig = "", viewMode = store_get("view", "table"), sortKey = null, sortDir = 1, cmpSel = [];
+
+async function api(path, body) {
+  const r = await fetch(path, body !== undefined ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+function store_get(k, d) { try { const v = localStorage.getItem("mt2." + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }
+const store = {get(k, d) { try { const v = localStorage.getItem("mt2." + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+               set(k, v) { try { localStorage.setItem("mt2." + k, JSON.stringify(v)); } catch (e) {} }};
+
+/* ---------------- 标签页 ---------------- */
+function tab(name) {
+  document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === name));
+  ["result", "history", "compare", "merge", "selftest"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== name));
+  if (name === "history") loadHistory();
+}
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => tab(b.dataset.tab));
+
+/* ---------------- 接口管理 ---------------- */
+function renderEndpoints() {
+  $("eps").innerHTML = endpoints.length ? endpoints.map(e => `<div class="ep" data-id="${e.id}">
+    <div><span class="nm">${esc(e.name)}</span> <span class="tag">${esc(e.api === "auto" ? "自动→" + (e.api_detected || "未探测") : e.api)}</span><span class="tag">${e.models.length} 个模型</span></div>
+    <div class="url">${esc(e.base_url)} · 密钥 ${esc(e.key_hint)}${e.models_checked_at ? " · 探测于 " + esc(e.models_checked_at.replace("T", " ")) : ""}</div>
+    <div class="btns"><button class="ghost sm" data-act="probe">探测模型</button><button class="ghost sm" data-act="edit">修改</button><button class="danger sm" data-act="del">删除</button></div></div>`).join("")
+    : "<span class='mute'>还没有接口。点“＋ 添加”填写地址和密钥，或从 OpenClaw 导入。</span>";
+  $("eps").querySelectorAll("button[data-act]").forEach(b => b.onclick = () => epAction(b.closest(".ep").dataset.id, b.dataset.act, b));
+  renderModels();
+}
+async function loadEndpoints() { endpoints = (await api("/api/endpoints")).endpoints; renderEndpoints(); }
+function showForm(ep) {
+  $("epForm").classList.remove("hidden"); $("f_msg").textContent = "";
+  $("f_id").value = ep ? ep.id : ""; $("f_name").value = ep ? ep.name : ""; $("f_url").value = ep ? ep.base_url : "";
+  $("f_key").value = ""; $("f_keyhint").textContent = ep ? `（留空表示不变，当前 ${ep.key_hint}）` : "";
+  $("f_api").value = ep ? ep.api : "auto"; $("f_models").value = ep ? ep.models.join("\n") : "";
+  $("f_name").focus();
+}
+async function saveEp() {
+  const body = {id: $("f_id").value || undefined, name: $("f_name").value, base_url: $("f_url").value, api: $("f_api").value,
+                models: $("f_models").value.split("\n").map(s => s.trim()).filter(Boolean)};
+  if ($("f_key").value) body.api_key = $("f_key").value;
+  $("f_save").disabled = true; $("f_msg").className = "msg mute"; $("f_msg").textContent = "保存中…";
+  try {
+    const {endpoint} = await api("/api/endpoints", body);
+    $("f_msg").textContent = "已保存，正在探测模型列表和接口类型…";
+    const r = await api("/api/endpoints/probe", {id: endpoint.id});
+    $("epForm").classList.add("hidden");
+    await loadEndpoints();
+    probeMsg(endpoint.name, r);
+  } catch (e) { $("f_msg").className = "msg err"; $("f_msg").textContent = e.message; await loadEndpoints().catch(() => {}); }
+  $("f_save").disabled = false;
+}
+function probeMsg(name, r) {
+  $("epMsg").className = "msg " + (r.errors.length ? "err" : "ok");
+  $("epMsg").textContent = `${name}：读到 ${r.models} 个模型，接口类型 ${r.api || "未确定"}` + (r.errors.length ? "。" + r.errors.join("；") : "");
+}
+async function epAction(id, act, btn) {
+  const ep = endpoints.find(e => e.id === id);
+  if (act === "edit") return showForm(ep);
+  if (act === "del") {
+    if (!confirm(`删除接口“${ep.name}”？密钥和模型列表会一并删除（历史测试结果不受影响）。`)) return;
+    try { await api("/api/endpoints/delete", {id}); [...selected].filter(k => k.startsWith(id + SEP)).forEach(k => selected.delete(k)); await loadEndpoints(); saveSel(); } catch (e) { $("epMsg").className = "msg err"; $("epMsg").textContent = e.message; }
+    return;
+  }
+  btn.disabled = true; btn.textContent = "探测中…"; $("epMsg").className = "msg mute"; $("epMsg").textContent = "";
+  try { const r = await api("/api/endpoints/probe", {id}); await loadEndpoints(); probeMsg(ep.name, r); }
+  catch (e) { $("epMsg").className = "msg err"; $("epMsg").textContent = e.message; btn.disabled = false; btn.textContent = "探测模型"; }
+}
+
+/* ---------------- 模型与场景选择 ---------------- */
+function renderModels() {
+  const f = $("mfilter").value.trim().toLowerCase();
+  $("models").innerHTML = endpoints.length ? endpoints.map(e => {
+    const ms = e.models.filter(m => !f || m.toLowerCase().includes(f));
+    return `<div class="grp">${esc(e.name)} <button class="ghost sm" data-all="${e.id}">全选</button><button class="ghost sm" data-none="${e.id}">清空</button></div>` +
+      (ms.length ? ms.map(m => `<label><input type="checkbox" data-k="${esc(e.id + SEP + m)}" ${selected.has(e.id + SEP + m) ? "checked" : ""}>${esc(m)}</label>`).join("") : "<span class='mute'>无模型（先探测）</span>");
+  }).join("") : "<span class='mute'>先添加接口</span>";
+  $("models").querySelectorAll("input").forEach(i => i.onchange = () => { i.checked ? selected.add(i.dataset.k) : selected.delete(i.dataset.k); saveSel(); updateEst(); });
+  const vis = id => [...$("models").querySelectorAll("input")].filter(i => i.dataset.k.startsWith(id + SEP));
+  $("models").querySelectorAll("[data-all]").forEach(b => b.onclick = () => { vis(b.dataset.all).forEach(i => { i.checked = true; selected.add(i.dataset.k); }); saveSel(); updateEst(); });
+  $("models").querySelectorAll("[data-none]").forEach(b => b.onclick = () => { vis(b.dataset.none).forEach(i => { i.checked = false; selected.delete(i.dataset.k); }); saveSel(); updateEst(); });
+  updateEst();
+}
+function renderScen() {
+  $("scen").innerHTML = Object.entries(cfg.scenarios).map(([k, v]) =>
+    `<div class="chk"><input type="checkbox" id="sc_${k}" data-sc="${k}" ${chosenSc.has(k) ? "checked" : ""}><label for="sc_${k}">${esc(v)}</label><span>${cfg.tasks_per_scenario[k]} 个请求/轮/模型</span></div>`).join("");
+  $("scen").querySelectorAll("input").forEach(i => i.onchange = () => { i.checked ? chosenSc.add(i.dataset.sc) : chosenSc.delete(i.dataset.sc); saveSel(); updateEst(); });
+}
+function validSelected() { const ids = new Set(endpoints.map(e => e.id)); return [...selected].filter(k => { const [id, m] = k.split(SEP); const e = endpoints.find(x => x.id === id); return ids.has(id) && e.models.includes(m); }); }
+function updateEst() {
+  const n = validSelected().length, tasks = [...chosenSc].reduce((a, s) => a + (cfg.tasks_per_scenario[s] || 0), 0), r = +$("rounds").value || 1;
+  // 预热会给每个模型多发 1 次请求，估算要算进去，否则显示的时间偏短
+  const warm = $("warmup").checked ? n : 0;
+  const total = n * tasks * r + warm;
+  $("selcount").textContent = `已选 ${n} 个`; $("speedBox").classList.toggle("hidden", !chosenSc.has("speed"));
+  $("est").textContent = total ? `共 ${total} 个请求${warm ? `（含 ${warm} 次预热）` : ""}，约 ${Math.max(1, Math.ceil(total * (3 + (+$("gap").value || 0)) / 60))} 分钟` : "";
+}
+function saveSel() { store.set("sel", [...selected]); store.set("sc", [...chosenSc]); }
+function savePrm() { store.set("prm", {prompt: $("prompt").value, context: $("context").value, rounds: $("rounds").value, timeout: $("timeout").value, gap: $("gap").value, warmup: $("warmup").checked, effort: $("effort").value, useName: $("useName").checked, runName: $("runName").value}); }
+function nameUi() {
+  const on = $("useName").checked, n = $("runName").value.trim(), d = new Date(), pad = x => String(x).padStart(2, "0");
+  $("runName").classList.toggle("hidden", !on); $("nameHint").classList.toggle("hidden", !on);
+  $("nameHint").textContent = `将保存为 results/${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-<当天序号>${n ? "_" + n : "_（请填写名称）"}/`;
+}
+
+/* ---------------- 启动与进度 ---------------- */
+async function start() {
+  $("runErr").textContent = "";
+  const runName = $("useName").checked ? $("runName").value.trim() : "";
+  if ($("useName").checked && !runName) { $("runErr").textContent = "已勾选“自定义测试名称”，请填写名称"; $("runName").focus(); return; }
+  const by = {};
+  validSelected().forEach(k => { const [id, m] = k.split(SEP); (by[id] = by[id] || []).push(m); });
+  try {
+    await api("/api/run", {selection: Object.entries(by).map(([endpoint, models]) => ({endpoint, models})), scenarios: [...chosenSc], prompt: $("prompt").value,
+      rounds: +$("rounds").value, timeout: +$("timeout").value, context: +$("context").value, gap: +$("gap").value, warmup: $("warmup").checked, name: runName, effort: $("effort").value});
+  } catch (e) { $("runErr").textContent = e.message; return; }
+  savePrm(); lastSig = ""; setRunning(true); tab("result"); polling = setInterval(poll, 800); poll();
+}
+function setRunning(on) { $("run").disabled = on; $("stop").classList.toggle("hidden", !on); $("progress").classList.toggle("hidden", !on && !$("pgText").textContent); }
+async function poll() {
+  const j = await api("/api/job");
+  if (j.state === "starting") return;
+  $("progress").classList.remove("hidden");
+  $("pgBar").style.width = (j.total ? Math.round(100 * (j.done || 0) / j.total) : 0) + "%";
+  const names = {running: "测试中", done: "已完成", stopped: "已停止", error: "出错"};
+  $("pgText").textContent = `${names[j.state] || j.state} ${j.done || 0}/${j.total || 0}`;
+  $("pgCur").textContent = j.state === "running" ? (j.current || "") : "";
+  const sig = j.state + "|" + (j.done || 0);
+  if (j.records && j.records.length && sig !== lastSig) { lastSig = sig; show({id: null, rows: j.rows, records: j.records, conclusion: j.conclusion, env: null}, "本次测试（进行中）"); }
+  if (j.state === "error") $("runErr").textContent = j.error;
+  if (!["running", "starting"].includes(j.state)) {
+    clearInterval(polling); setRunning(false);
+    // 结果已随轮询拿到（与落盘内容一致），直接切到“已完成”标题，不再重新拉一次：
+    // 免得用户展开的明细被收起、场景 tab 被重置，还多一次 HTTP 请求
+    if (j.run_id && j.records && j.records.length) {
+      show({id: j.run_id, rows: j.rows, records: j.records, conclusion: j.conclusion, env: null, fingerprint: j.fingerprint}, `测试结果 ${j.run_id}（${j.state === "stopped" ? "已停止" : "已完成"}）`);
+      location.hash = "run=" + encodeURIComponent(j.run_id);
+    } else if (j.run_id) {  // 没有轮询到记录（比如一开始就失败），回退到按 id 拉取
+      openRun(j.run_id);
+    }
+    loadHistory();
+  }
+}
+
+/* ---------------- 结果展示 ---------------- */
+function scName(s) { return cfg.scenarios[s] || s; }
+/* ---------------- 模型指纹（数值分布对账，与 core.py 同一套常量和算法） ---------------- */
+const FP_MIN = 120, FP_NOISE = 2, FP_FLOOR = .1;
+function fpHellinger(a, b) {
+  const k = a.length, sa = a.reduce((x, y) => x + y, 0) + .5 * k, sb = b.reduce((x, y) => x + y, 0) + .5 * k;
+  let s = 0; for (let i = 0; i < k; i++) { const d = Math.sqrt((a[i] + .5) / sa) - Math.sqrt((b[i] + .5) / sb); s += d * d; }
+  return Math.sqrt(s / 2);
+}
+function fpVerdict(dist, noise) {
+  const thr = Math.max(FP_NOISE * (noise || 0), FP_FLOOR);
+  return {thr, v: dist <= thr ? "指纹一致" : dist >= 2 * thr ? "指纹不一致" : "差异不明显（不作判断）"};
+}
+function fpTag(v) { return `<span class="tag ${v === "指纹一致" ? "ok" : v === "指纹不一致" ? "bad" : "warn"}">${esc(v)}</span>`; }
+function fpPanel(fp) {
+  $("fpPanel").classList.toggle("hidden", !fp);
+  if (!fp) return;
+  const labels = fp.labels || {}, names = Object.keys(labels);
+  let html = `<div class="mute" style="font-size:12.5px;margin-bottom:6px">让模型输出无语义随机整数，比较数值分布的 Hellinger 距离（0 = 同分布）。判定线由同模型自身的抽样噪声决定，数字不够会拒判。指纹是启发式证据，不是身份认证；跨次测试（如直连 vs 中转）的对账在“对比”页。</div>`;
+  const maxBin = Math.max(1, ...names.flatMap(n => labels[n].counts));
+  html += names.map((n, i) => {
+    const c = labels[n].counts, W = 540, H = 44, bw = (W - 210) / c.length;
+    const bars = c.map((v, j) => `<rect x="${205 + j * bw}" y="${H - 12 - (H - 18) * v / maxBin}" width="${bw - 1}" height="${(H - 18) * v / maxBin}" fill="${COLORS[i % 9]}" opacity=".75"/>`).join("");
+    return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:560px"><text x="200" y="${H / 2 + 4}" text-anchor="end" style="font-size:11px">${esc(n.length > 28 ? "…" + n.slice(-27) : n)}</text>${bars}</svg>`;
+  }).join("") + `<div class="mute" style="font-size:11.5px">横轴：1–355 分 ${labels[names[0]].counts.length} 箱；各模型同一纵轴刻度</div>`;
+  if ((fp.pairs || []).length) {
+    html += `<div style="overflow:auto;margin-top:8px"><table class="nw"><tr><th>模型 A</th><th>模型 B</th><th>有效数字</th><th>Hellinger 距离</th><th>判定线</th><th>结论</th></tr>` +
+      fp.pairs.map(p => `<tr><td>${esc(p.a)}</td><td>${esc(p.b)}</td><td>${p.n_a}/${p.n_b}</td><td>${p.dist ?? "-"}</td><td>${p.thr ?? "-"}<div class="mute" style="font-size:11px">噪声底线 ${p.noise ?? "-"}</div></td><td>${fpTag(p.verdict)}</td></tr>`).join("") + `</table></div>`;
+  } else {
+    html += `<div class="infobox">${names.map(esc).join("、")}：只有一个模型的指纹数据；再测一次（如直连 vs 中转）后到“对比”里看指纹距离。</div>`;
+  }
+  html += `<div class="mute" style="font-size:11.5px;margin-top:4px">判定线 = 抽样噪声 × ${FP_NOISE}（不低于 ${FP_FLOOR}）；距离介于 1×–2× 判定线之间时不作判断。</div>`;
+  $("fp").innerHTML = html;
+}
+function show(data, title) {
+  const open = snapshotOpen();
+  view = data; $("empty").classList.add("hidden"); $("result").classList.remove("hidden");
+  $("resTitle").textContent = title;
+  $("resDl").classList.toggle("hidden", !data.id);
+  if (data.id) $("resDl").href = "/raw/" + encodeURIComponent(data.id) + ".json";
+  $("concl").textContent = data.conclusion || "测试进行中…";
+  const scs = [...new Set(data.rows.map(r => r.scenario))];
+  if (!viewSc || !scs.includes(viewSc)) viewSc = scs[0];
+  $("scChips").innerHTML = scs.map(s => `<button data-s="${s}" class="${s === viewSc ? "on" : ""}">${esc(scName(s))}</button>`).join("");
+  $("scChips").querySelectorAll("button").forEach(b => b.onclick = () => { viewSc = b.dataset.s; show(view, title); });
+  const rows = data.rows.filter(r => r.scenario === viewSc), recs = data.records.filter(r => (r.scenario || "speed") === viewSc);
+  $("viewSeg").querySelectorAll("button").forEach(b => { b.classList.toggle("on", b.dataset.v === viewMode); b.onclick = () => { viewMode = b.dataset.v; store.set("view", viewMode); show(view, title); }; });
+  $("tblWrap").classList.toggle("hidden", viewMode !== "table"); $("cards").classList.toggle("hidden", viewMode !== "cards");
+  sampleHint(rows); table(rows); cards(rows); chartSeg(rows); chartDots(rows, recs); scatter(rows); matrix(rows); fpPanel(data.fingerprint); codes(data.records); envBox(data.env); detail(recs);
+  restoreOpen(open);
+}
+function snapshotOpen() { return new Set([...document.querySelectorAll("#detail details[open], #env details[open]")].map(d => d.dataset.k)); }
+function restoreOpen(set) { document.querySelectorAll("#detail details, #env details").forEach(d => { if (set.has(d.dataset.k)) d.open = true; }); }
+function sampleTag(r) {
+  if (r.low_sample) return ` <span class="tag warn" title="只有 ${r.n} 个请求（少于 5 个），结果容易被偶然波动带偏。解决：把轮数调大后重测，详见上方提示。">样本不足</span>`;
+  if (r.low_ok_sample) return ` <span class="tag warn" title="共 ${r.n} 个请求，但只有 ${r.ok} 个成功；耗时只统计成功请求，实际用来算耗时的只有 ${r.ok} 个。解决：先处理失败原因（看状态码分布），或把轮数调大，详见上方提示。">成功样本不足</span>`;
+  return "";
+}
+function sampleHint(rows) {
+  const bad = rows.filter(r => r.low_sample || r.low_ok_sample), box = $("sampleHint");
+  box.classList.toggle("hidden", !bad.length);
+  if (!bad.length) return;
+  const t = (cfg.tasks_per_scenario && cfg.tasks_per_scenario[viewSc]) || 1, suggest = Math.min(cfg.max_rounds || 10, Math.max(5, Math.ceil(8 / t)));  // 每个模型约 8 个请求，留余量应对少量失败
+  const lines = bad.map(r => r.low_sample ? `• ${esc(r.label)}：只有 ${r.n} 个请求（至少要 5 个）` : `• ${esc(r.label)}：${r.n} 个请求里只有 ${r.ok} 个成功（耗时只统计成功请求，至少要 5 个）`);
+  box.innerHTML = `<b>⚠ 样本不足：下面的耗时、排名先别当结论</b><div>${lines.join("<br>")}</div>
+    <div style="margin-top:6px"><b>为什么：</b>样本太少时，中位数和置信区间会被一两次偶然的快慢带偏，“谁更快”可能只是运气。</div>
+    <div style="margin-top:2px"><b>怎么解决：</b>① 把左侧“轮数”调到 <b>${suggest}</b> 或更多后重测 <button class="ghost sm" id="setRounds">一键设置轮数 = ${suggest}</button>；
+    ② 如果是失败请求太多，先看下方“状态码分布”处理失败原因（401 密钥、429 限流、503/504 中转站），否则轮数再多也凑不够成功样本；
+    ③ 已经测过多次、想合并着看，到“历史与趋势”勾选这些结果，点“对比所选”。</div>`;
+  $("setRounds").onclick = () => { const r = $("rounds"); r.value = Math.max(+r.value || 0, suggest); savePrm(); updateEst(); r.classList.remove("fl"); void r.offsetWidth; r.classList.add("fl"); r.focus(); r.select(); };
+}
+function p95Text(t) { return t ? (t.p95_ok ? "p95 " + sec(t.p95) : "最大 " + sec(t.max)) : "-"; }
+function mostlyBuffered(r) { return r.ok > 0 && r.buffered_n * 2 >= r.ok; }
+// 少数请求非流式时不算整体非流式（mostlyBuffered），但首字中位数会被这些请求污染，需要在表格和卡片上提示
+function someBuffered(r) { return r.ok > 0 && r.buffered_n > 0 && !mostlyBuffered(r); }
+function bufTag(r) { return someBuffered(r) ? ` <span class="tag warn" title="${r.buffered_n}/${r.ok} 个成功请求是中转站攒满后一次返回的，它们的“首字”不是真首字；首字中位数会被这些请求拉长。看明细里标了“非流式”的行。">部分非流式</span>` : ""; }
+function cards(rows) {
+  $("cards").innerHTML = rows.map(r => {
+    const graded = r.pass_rate != null, good = r.ok === r.n && (!graded || r.pass_rate === 1), cls = r.ok === 0 ? "bad" : good ? "" : "warn";
+    const codeTags = Object.entries(r.codes).map(([k, v]) => `<span class="tag bad" title="${esc(HINTS[k] || "")}">${esc(k)}×${v}</span>`).join("");
+    const t = r.total, ft = r.first_token, buf = mostlyBuffered(r);
+    return `<div class="card ${cls}"><b>${esc(r.label)}</b>${sampleTag(r)}${buf ? ' <span class="tag warn" title="响应几乎在最后一刻才一次性到达（中转站攒满后返回），首字不是模型真正的首字">非流式</span>' : ""}
+      <div class="big">${graded ? `${r.pass_n}/${r.graded} 答对` : r.ok ? sec(t.median) : "全部失败"}</div>
+      <div class="ln">成功 <b>${r.ok}/${r.n}</b>（95% 区间 ${ciText(r.ok_ci)}）${graded ? ` · 正确率 <b>${pf(r.pass_rate)}</b>（${ciText(r.pass_ci)}${r.pass_ci_basis ? "，按 " + r.pass_units + " 个" + r.pass_ci_basis + "计" : ""}）` : ""}</div>
+      ${t ? `<div class="ln">总耗时 中位 <b>${sec(t.median)}</b> · ${p95Text(t)} · 最小 ${sec(t.min)}${viewSc === "tool" ? "（两步合计）" : ""}</div>` : ""}
+      ${r.gen ? `<div class="ln">第二步生成 中位 <b>${sec(r.gen.median)}</b>（与单次请求可比）</div>` : ""}
+      ${ft ? `<div class="ln">首字 中位 <b>${buf ? "不可信" : sec(ft.median)}</b>${buf ? "" : bufTag(r)} · 首个事件 ${sec(r.first_event && r.first_event.median)}${r.first_think ? " · 首个思考 " + sec(r.first_think.median) : ""}${r.queue_median ? ` · 排队 <b>${sec(r.queue_median)}</b>` : ""}</div>` : ""}
+      ${r.tps ? `<div class="ln">输出速度 <b>${r.tps.median}</b> tokens/s</div>` : r.tps_overall ? `<div class="ln">整体速度 <b>${r.tps_overall.median}</b> tokens/s（含等待）</div>` : ""}
+      ${r.reasoning_share != null ? `<div class="ln">推理 tokens 占输出 <b>${pf(r.reasoning_share)}</b>${r.reasoning_tokens ? "（中位 " + Math.round(r.reasoning_tokens.median) + "）" : ""}</div>` : r.think_share != null && !buf ? `<div class="ln">思考/排队占总耗时 <b>${pf(r.think_share)}</b></div>` : ""}
+      ${r.tin != null ? `<div class="ln">用量 ${r.tin}/${r.tout} tokens${r.cached ? "，缓存命中中位 " + r.cached : ""}${/^needle/.test(r.scenario) ? "（实际输入 " + r.tin.toLocaleString() + " tokens，标题里的“约 1 万/3 万”是估算）" : ""}</div>` : ""}
+      ${r.cache_trend && (r.cache_trend.speedup || 0) >= 1.3 ? `<div class="ln" style="color:var(--amber)"><b>⚠ 疑似前缀缓存污染</b>：首轮 ${sec(r.cache_trend.total_first)} → 末轮 ${sec(r.cache_trend.total_last)}（快 ${r.cache_trend.speedup}×，缓存 ${r.cache_trend.cached_first}→${r.cache_trend.cached_last} tokens），后几轮偏快会拉低中位数</div>` : ""}
+      ${r.consistency != null ? `<div class="ln">答案一致性 <b>${pf(r.consistency)}</b></div>` : ""}
+      <div>${codeTags}</div></div>`;
+  }).join("") || "<span class='mute'>无数据</span>";
+}
+
+const COLS = [
+  {k: "label", t: "模型", get: r => r.label, str: true},
+  {k: "ok", t: "成功率", get: r => r.n ? r.ok / r.n : null, fmt: r => `${r.ok}/${r.n}`, best: 1},
+  {k: "pass", t: "正确率", get: r => r.pass_rate, fmt: r => r.pass_rate == null ? "-" : `${pf(r.pass_rate)} (${r.pass_n}/${r.graded})`, best: 1},
+  {k: "total", t: "总耗时 中位", get: r => r.total && r.total.median, fmt: r => sec(r.total && r.total.median), best: -1,
+   title: "含排队等待的总耗时。只有在各模型输出 tokens 数接近时才可直接比；输出长度差得多时，请看 tokens/s"},
+  {k: "tail", t: "p95 / 最大", get: r => r.total && (r.total.p95_ok ? r.total.p95 : r.total.max), fmt: r => p95Text(r.total), best: -1},
+  {k: "ft", t: "首字 中位", get: r => mostlyBuffered(r) ? null : r.first_token && r.first_token.median, fmt: r => mostlyBuffered(r) ? "非流式" : sec(r.first_token && r.first_token.median), best: -1},
+  {k: "fe", t: "首个事件", get: r => r.first_event && r.first_event.median, fmt: r => sec(r.first_event && r.first_event.median), best: -1},
+  {k: "tps", t: "tokens/s", get: r => r.tps ? r.tps.median : null, fmt: r => r.tps ? String(r.tps.median) : r.tps_overall ? r.tps_overall.median + "（含等待）" : "-", best: 1},
+  {k: "tout", t: "输出 tokens", get: r => r.tout, fmt: r => r.tout == null ? "-" : String(r.tout), title: "中位输出长度。总耗时只有在输出长度接近时才可比：输出短的天然占优。差异大时看 tokens/s"},
+  {k: "per1k", t: "每千 tokens 耗时", get: r => r.sec_per_1k ? r.sec_per_1k.median : null, fmt: r => r.sec_per_1k ? sec(r.sec_per_1k.median) : "-", best: -1,
+   title: "总耗时 ÷ 输出千 tokens 数：把输出长度归一化后再比，输出长短不一时比“总耗时”更公平"},
+  {k: "think", t: "推理占比", get: r => r.reasoning_share ?? r.think_share, fmt: r => r.reasoning_share != null ? pf(r.reasoning_share) + "（tokens）" : r.think_share != null ? pf(r.think_share) + "（耗时）" : "-"},
+  {k: "queue", t: "排队", get: r => r.queue_median, fmt: r => r.queue_median == null ? "-" : sec(r.queue_median), best: -1, title: "响应头到首个数据事件的等待：服务端/中转站内部排队，不是网络也不是模型"},
+  {k: "cons", t: "一致性", get: r => r.consistency, fmt: r => pf(r.consistency), best: 1},
+];
+function table(rows) {
+  const cols = COLS.filter(c => c.str || rows.some(r => c.get(r) != null));
+  let list = [...rows];
+  if (sortKey) { const c = COLS.find(x => x.k === sortKey); if (c) list.sort((a, b) => { const x = c.get(a), y = c.get(b); if (x == null) return 1; if (y == null) return -1; return (c.str ? String(x).localeCompare(String(y)) : x - y) * sortDir; }); }
+  const bestOf = c => { if (!c.best || rows.length < 2) return null; const v = rows.map(c.get).filter(x => x != null); if (v.length < 2 || new Set(v).size === 1) return null; return c.best > 0 ? Math.max(...v) : Math.min(...v); };
+  const bests = Object.fromEntries(cols.map(c => [c.k, bestOf(c)]));
+  $("tbl").innerHTML = `<tr>${cols.map(c => `<th class="sortable" data-k="${c.k}">${c.t}${sortKey === c.k ? (sortDir > 0 ? " ▲" : " ▼") : ""}</th>`).join("")}</tr>` +
+    list.map(r => `<tr>${cols.map(c => { const v = c.get(r), isBest = bests[c.k] != null && v === bests[c.k];
+      return `<td class="${isBest ? "best" : ""}">${c.str ? esc(r.label) + sampleTag(r) : (c.fmt ? c.fmt(r) : v)}${c.k === "ft" ? bufTag(r) : ""}</td>`; }).join("")}</tr>`).join("");
+  $("tbl").querySelectorAll("th.sortable").forEach(th => th.onclick = () => { sortDir = sortKey === th.dataset.k ? -sortDir : 1; sortKey = th.dataset.k; table(rows); });
+  $("tblNote").textContent = "点表头排序；绿色加粗 = 该列最优";
+}
+
+function scatter(rows) {
+  const pts = rows.filter(r => r.pass_rate != null && r.total);
+  $("scPanel").classList.toggle("hidden", pts.length < 2);
+  if (pts.length < 2) return;
+  const W = 1080, H = 400, L = 60, B = 40, T = 22, R = 34, max = Math.max(...pts.map(r => r.total.median)) * 1.15 || 1;
+  const sx = v => L + (W - L - R) * v / max, sy = v => T + (H - T - B) * (1 - v);
+  let s = [0, .25, .5, .75, 1].map(v => `<line x1="${L}" x2="${W - R}" y1="${sy(v)}" y2="${sy(v)}" stroke="currentColor" opacity=".12"/><text class="m" x="${L - 5}" y="${sy(v) + 4}" text-anchor="end">${Math.round(v * 100)}%</text>`).join("");
+  for (let t = 0; t <= 4; t++) { const v = max * t / 4; s += `<text class="m" x="${sx(v)}" y="${H - 12}" text-anchor="middle" style="font-size:12px">${v.toFixed(1)}s</text>`; }
+  pts.forEach((r, i) => { const c = COLORS[i % 9], x = sx(r.total.median), y = sy(r.pass_rate), ci = r.pass_ci || [r.pass_rate, r.pass_rate];
+    s += `<line x1="${x}" x2="${x}" y1="${sy(ci[0])}" y2="${sy(ci[1])}" stroke="${c}" stroke-width="3" opacity=".5"/><circle cx="${x}" cy="${y}" r="9" fill="${c}"><title>${esc(r.label)}：${pf(r.pass_rate)}，${sec(r.total.median)}</title></circle>
+      <text x="${x > W * 0.7 ? x - 13 : x + 13}" y="${y - 11}" text-anchor="${x > W * 0.7 ? "end" : "start"}" style="font-size:12.5px">${esc(r.label.length > 34 ? "…" + r.label.slice(-33) : r.label)}</text>`; });
+  $("chartSc").innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%">${s}</svg>`;
+}
+function chartSeg(rows) {
+  const tool = viewSc === "tool", ok = rows.filter(r => r.total);
+  $("segTitle").textContent = tool ? "总耗时（第二步生成，中位数；两步合计见总表）" : "分段耗时（中位数）：握手 / 排队 / 等首个事件 / 思考到首字 / 生成";
+  if (!ok.length) { $("chartSeg").innerHTML = "<span class='mute'>无成功请求</span>"; return; }
+  // 整行宽画布 + 高行距 + 粗条：一个模型一行，读数不用眯眼
+  const W = 1080, L = 250, BAR = 34, STEP = 62, H = STEP * rows.length + 96, max = Math.max(...ok.map(r => r.total.median)), sx = v => (W - L - 110) * v / max;
+  let s = "";
+  rows.forEach((r, i) => {
+    const y = 10 + i * STEP;
+    s += `<text x="${L - 12}" y="${y + BAR / 2 + 5}" text-anchor="end" style="font-size:13px">${esc(r.label.length > 34 ? "…" + r.label.slice(-33) : r.label)}</text>`;
+    if (!r.total) { s += `<text x="${L}" y="${y + BAR / 2 + 5}" style="fill:#ff6b6b">全部失败</text>`; return; }
+    const tot = r.total.median;
+    if (tool) {  // 工具场景画第二步生成（与单次请求可比）；两步合计在总表和卡片
+      s += `<rect x="${L}" y="${y}" width="${sx(tot)}" height="${BAR}" rx="4" fill="#ffb454"/><text x="${L + sx(tot) + 10}" y="${y + BAR / 2 + 5}" style="font-weight:600">${sec(tot)}</text>`;
+      return;
+    }
+    const hd = Math.min(r.connect ? r.connect.median : 0, tot), q = Math.min(r.queue_median || 0, tot, tot - hd);
+    const fe = Math.min(r.first_event ? r.first_event.median : 0, tot), ft = Math.min(r.first_token ? r.first_token.median : fe, tot);
+    const a = Math.max(fe - hd - q, 0), b = Math.max(ft - fe, 0), c = Math.max(tot - Math.max(ft, fe), 0);
+    let x = L;
+    // 每段都标数值（段够宽时才放，避免文字互相压）；悬停看名称
+    [[hd, "#8fa3bf", "握手"], [q, "#ff8c42", "排队"], [a, "#5ad1d0", "等首个事件"], [b, "#a78bfa", "思考到首字"], [c, "#ffb454", "生成"]].forEach(([w, color, name]) => {
+      if (w <= 0) return;
+      s += `<rect x="${x}" y="${y}" width="${sx(w)}" height="${BAR}" fill="${color}"><title>${name} ${sec(w)}</title></rect>`;
+      if (sx(w) > 46) s += `<text x="${x + sx(w) / 2}" y="${y + BAR / 2 + 5}" text-anchor="middle" style="font-size:11.5px;fill:#0a0d12;font-weight:700" pointer-events="none">${w >= 1 ? w.toFixed(1) : w.toFixed(2)}</text>`;
+      x += sx(w);
+    });
+    s += `<text x="${L + sx(tot) + 10}" y="${y + BAR / 2 + 5}" style="font-weight:600">${sec(tot)}</text>`;
+  });
+  // 图例：两行三列，字号放大（握手是连接建立耗时，本就不计入请求耗时，仅供参考）
+  const legend = [[["#8fa3bf", "握手（不计入）"], ["#ff8c42", "排队"], ["#5ad1d0", "等首个事件"]],
+                  [["#a78bfa", "思考到首字"], ["#ffb454", "生成"], [null, ""]]];
+  legend.forEach((row, ri) => row.reduce((xs, [color, name]) => {
+    if (!color) return xs;
+    s += `<rect x="${xs}" y="${H - 44 + ri * 26}" width="13" height="13" fill="${color}" rx="2"/><text x="${xs + 20}" y="${H - 33 + ri * 26}" class="m" style="font-size:12.5px">${esc(name)}</text>`;
+    return xs + 20 + name.length * 13 + 46;
+  }, L));
+  $("chartSeg").innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%">${s}</svg>`;
+}
+function chartDots(rows, recs) {
+  const vals = recs.map(r => r.total_s || 0), max = Math.max(1, ...vals);
+  // 整行宽画布 + 高行距 + 大圆点：一眼看出离散程度和离群失败
+  const W = 1080, L = 250, STEP = 58, H = STEP * rows.length + 74, sx = v => L + (W - L - 60) * v / max;
+  let s = "";
+  for (let t = 0; t <= 4; t++) {
+    const v = max * t / 4;
+    s += `<line x1="${sx(v)}" x2="${sx(v)}" y1="6" y2="${H - 34}" stroke="currentColor" opacity=".12"/><text class="m" x="${sx(v)}" y="${H - 14}" text-anchor="middle" style="font-size:12px">${v.toFixed(1)}s</text>`;
+  }
+  rows.forEach((r, i) => {
+    const y = 12 + i * STEP + 14;
+    s += `<text x="${L - 12}" y="${y + 5}" text-anchor="end" style="font-size:13px">${esc(r.label.length > 34 ? "…" + r.label.slice(-33) : r.label)}</text>`;
+    s += `<line x1="${L}" y1="${y}" x2="${W - 40}" y2="${y}" stroke="currentColor" opacity=".06"/>`;
+    recs.filter(x => x.label === r.label).forEach(x => {
+      const cx = sx(x.total_s || 0);
+      s += x.ok ? `<circle cx="${cx}" cy="${y}" r="8" fill="${x.pass === false ? "#ffb454" : "#ffb454"}" opacity=".85"><title>#${x.seq || ""} ${(x.total_s || 0).toFixed(2)}s${x.pass === false ? " 答错" : ""}</title></circle>`
+        : `<text x="${cx}" y="${y + 8}" text-anchor="middle" style="fill:#ff6b6b;font-weight:700;font-size:19px"><title>HTTP ${x.status || "无响应"} ${esc(x.error)}</title>×</text>`;
+    });
+  });
+  $("chartDots").innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%">${s}</svg><div class="mute" style="font-size:12px;margin-top:4px">橙点 = 请求成功但答错；红 × = 失败（悬停看原因）。点越集中说明越稳定，靠右的点说明有请求明显更慢。</div>`;
+}
+function matrix(rows) {
+  const graded = rows.filter(r => r.pass_rate != null && Object.keys(r.by_task).length > 1);
+  $("mxPanel").classList.toggle("hidden", !graded.length);
+  if (!graded.length) return;
+  const tasks = Object.keys(graded[0].by_task);
+  $("matrix").innerHTML = `<tr><th>题目</th>${graded.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>` + tasks.map(t => `<tr><td>${esc(t)} ${esc(graded[0].by_task[t].name)}</td>` +
+    graded.map(r => { const c = r.by_task[t]; if (!c) return "<td>-</td>"; return `<td class="${c.pass === c.n ? "cell-ok" : c.pass === 0 ? "cell-bad" : "cell-mid"}">${c.pass}/${c.n}</td>`; }).join("") + "</tr>").join("");
+}
+function codes(records) {
+  const c = {}; records.forEach(r => { const k = r.ok ? "成功" : (r.status || "无响应"); c[k] = (c[k] || 0) + 1; });
+  $("codes").innerHTML = Object.entries(c).map(([k, v]) => `<span class="tag ${k === "成功" ? "" : "bad"}">${esc(k)} × ${v}${HINTS[k] ? "（" + esc(HINTS[k]) + "）" : ""}</span>`).join("") || "<span class='mute'>无</span>";
+}
+function envBox(env) {
+  if (!env) { $("env").textContent = "测试结束保存后显示"; return; }
+  const eps = (env.endpoints || []).map(e => `${e.name}（${e.api}，${e.base_url}）`).join("；") || "旧版结果，未记录";
+  const sm = env.sampling, smTxt = sm ? ` · 采样 temperature=${sm.temperature}、输出上限 ${sm.max_tokens} tokens` : "";
+  $("env").innerHTML = `<div>${env.name ? "名称 <b>" + esc(env.name) + "</b> · " : ""}时间 ${esc((env.created || "").replace("T", " "))} · 脚本 v${esc(env.tool_version)} · 轮数 ${env.rounds ?? "-"} · 间隔 ${env.gap_s ?? "-"}s · 预热 ${env.warmup ? "是" : "否"} · 推理强度 ${esc(env.effort || "未指定")} · 随机种子 ${env.seed ?? "-"}${esc(smTxt)}</div>
+    <div>接口 ${esc(eps)}</div><div>冷连接握手（不计入请求耗时）：${esc(JSON.stringify(env.handshake_s || {}))}</div>
+    ${env.prompt ? `<div>自定义提示词：${esc(env.prompt.slice(0, 100))}${env.context_tokens ? "（背景约 " + env.context_tokens + " tokens）" : ""}</div>` : ""}
+    ${(env.scenarios || []).some(x => /^needle/.test(x)) ? `<div class="mute" style="font-size:11.5px">大海捞针的背景长度是估算值（中文字符 ÷ 1.5），实际输入 tokens 看卡片/明细里的用量</div>` : ""}
+    ${sm ? `<div class="mute" style="font-size:11.5px;margin-top:2px">采样参数已固定（不同接口默认值往往不同，固定后才能公平比较）</div>` : ""}
+    <details data-k="env"><summary>完整快照（JSON）</summary><pre>${esc(JSON.stringify(env, null, 1))}</pre></details>`;
+}
+function detail(recs) {
+  $("detail").innerHTML = `<tr><th>#</th><th>时间</th><th>模型</th><th>题目</th><th>结果</th><th>HTTP</th><th>连接</th><th>排队</th><th>首个事件</th><th>首字</th><th>生成</th><th>总耗时</th><th>tokens/s</th><th>回答 / 错误</th></tr>` +
+    recs.map(r => `<tr><td>${r.seq || ""}</td><td>${esc((r.time || "").slice(11))}</td><td>${esc(r.label || r.model)}</td><td>${esc(r.task_name || "")}</td>
+      <td class="${r.ok ? (r.pass === false ? "err" : "ok") : "err"}">${r.ok ? (r.pass === false ? "答错" : r.pass ? "答对" : "成功") : "失败"}</td><td>${esc(r.status ?? "-")}</td>
+      <td>${r.first_reused === false ? "新建" : "复用"}${r.conn_retry ? "<span class='tag warn' title='复用连接已被服务端关掉，已换新连接重发（不计入失败）'>重连</span>" : ""}</td>
+      <td>${r.queue_s == null ? "-" : sec(r.queue_s)}</td><td>${sec(r.first_event_s)}</td><td>${r.buffered ? "非流式" : sec(r.first_token_s)}</td><td>${r.gen_s == null ? "-" : sec(r.gen_s)}</td><td>${sec(r.total_s)}</td><td>${r.tps ?? r.tps_overall ?? "-"}</td>
+      <td style="white-space:normal;min-width:240px">${r.error ? `<span class="err">${esc(r.error.slice(0, 200))}</span> ` : ""}${r.pass === false && r.grade_note ? `<span class="err">${esc(r.grade_note)}</span> ` : ""}${r.text ? `<details data-k="d${r.seq}"><summary>${esc(r.text.slice(0, 40))}…</summary><div style="white-space:pre-wrap">${esc(r.text)}</div></details>` : ""}</td></tr>`).join("");
+  $("detailNote").textContent = "排队 = 响应头到首个数据事件的等待（服务端/中转站内部排队，不是网络也不是模型）；生成 = 工具场景第二步单独耗时（与单次请求可比）；重连 = 复用连接已被服务端关掉，已换新连接重发。";
+}
+/* ---------------- 历史与趋势 ---------------- */
+const idTitle = id => id;
+async function loadHistory() {
+  historyRuns = (await api("/api/history")).runs;
+  cmpSel = cmpSel.filter(id => historyRuns.some(r => r.id === id));
+  $("history").innerHTML = `<tr><th title="勾选后可以对比">选择</th><th>结果文件夹</th><th>名称</th><th>时间</th><th>场景</th><th>模型</th><th>请求</th><th>状态</th><th></th></tr>` + historyRuns.map(r =>
+    `<tr data-id="${esc(r.id)}" class="${cmpSel.includes(r.id) ? "sel" : ""}"><td class="cell-chk" data-nopen><label class="hit" title="勾选后加入对比"><input type="checkbox" data-cmp="${esc(r.id)}" ${cmpSel.includes(r.id) ? "checked" : ""}></label></td><td>${esc(r.id)}${r.legacy ? ' <span class="tag">旧版</span>' : ""}</td><td>${esc(r.name || "")}</td><td>${esc((r.created || "").replace("T", " "))}</td><td>${esc(r.scenarios.map(scName).join("、"))}</td>
+     <td title="${esc((r.models || []).join("\n"))}">${(r.models || []).length || "-"}</td><td>${r.n ?? "-"}</td><td>${r.state === "stopped" ? "已停止" : "完成"}</td>
+     <td class="acts" data-nopen>${r.legacy ? "" : `<button class="danger" data-del="${esc(r.id)}">删除</button>`}</td></tr>`).join("");
+  // 整行可点开结果（“查看”按钮与整行点击功能重复，已删除）；只有勾选格和删除按钮不触发打开
+  $("history").querySelectorAll("tr[data-id]").forEach(tr => tr.onclick = e => { if (e.target.closest("[data-nopen]")) return; openRun(tr.dataset.id); });
+  $("history").querySelectorAll("[data-cmp]").forEach(c => c.onchange = () => {
+    const id = c.dataset.cmp; cmpSel = cmpSel.filter(x => x !== id); if (c.checked) cmpSel.push(id); if (cmpSel.length > MAX_CMP) { cmpSel = cmpSel.slice(0, MAX_CMP); $("cmpInfo").textContent = `最多同时对比 ${MAX_CMP} 条`; }
+    syncCmp(); });
+  $("history").querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
+    if (!confirm(`删除结果 ${b.dataset.del}？文件夹会被移到 results/.trash/，可手动找回。`)) return;
+    try { await api("/api/run/delete", {id: b.dataset.del}); loadHistory(); } catch (e) { alert(e.message); }
+  });
+  cmpBtn();
+  const scs = [...new Set(historyRuns.filter(r => !r.legacy).flatMap(r => r.scenarios))];
+  const cur = $("trendSc").value; $("trendSc").innerHTML = scs.map(s => `<option value="${s}" ${s === cur ? "selected" : ""}>${esc(scName(s))}</option>`).join("");
+  trendConds(); trend();
+}
+function syncCmp() { document.querySelectorAll("#history [data-cmp]").forEach(x => { x.checked = cmpSel.includes(x.dataset.cmp); x.closest("tr").classList.toggle("sel", x.checked); }); cmpBtn(); }
+function cmpBtn() {
+  const n = cmpSel.length;
+  $("cmpBtn").disabled = n < 2; $("cmpBtn").textContent = n < 2 ? "对比所选（至少选 2 条）" : `对比所选（${n} 条）`;
+  $("mergeBtn").disabled = n < 2;
+  $("cmpClear").classList.toggle("hidden", !n);
+  $("cmpInfo").textContent = n ? `已选 ${n} 条，先勾选的 ${cmpSel[0]} 是基准（对比页里可以改）` : `勾选下面的测试结果，数量不限（最多 ${MAX_CMP} 条）；先勾选的作为基准`;
+}
+function trendConds() {
+  const sc = $("trendSc").value, seen = new Map();
+  historyRuns.filter(r => !r.legacy && r.brief).forEach(r => new Map(r.brief.filter(x => x.scenario === sc).map(x => [x.cond || "", x])).forEach((x, k) => { const o = seen.get(k) || {label: x.cond_label || "（旧结果，条件未记录）", n: 0}; o.n++; seen.set(k, o); }));  // 按“测试次数”计，不是模型行数
+  const cur = $("trendCond").value, first = [...seen.keys()].includes(cur) ? cur : [...seen.keys()][0];  // 默认选最近一次的条件（历史按时间倒序）
+  $("trendCond").innerHTML = [...seen].map(([k, o]) => `<option value="${esc(k)}" ${k === first ? "selected" : ""}>${esc(o.label)}（${o.n} 次）</option>`).join("");
+}
+function trend() {
+  const sc = $("trendSc").value, cond = $("trendCond").value;
+  const runs = [...historyRuns].filter(r => !r.legacy && r.brief && r.brief.some(b => b.scenario === sc && (b.cond || "") === cond)).reverse().slice(-30);
+  const sel = r => r.brief.filter(b => b.scenario === sc && (b.cond || "") === cond);
+  const graded = runs.some(r => sel(r).some(b => b.pass_rate != null));
+  $("trendNote").textContent = graded ? "纵轴：正确率（只比较条件相同的结果）" : "纵轴：总耗时中位数（秒，只比较条件相同的结果）";
+  if (runs.length < 2) { $("trend").textContent = "条件相同的历史测试不足 2 次，暂无趋势"; return; }
+  const val = b => graded ? b.pass_rate : b.total_median;
+  const names = [...new Set(runs.flatMap(r => sel(r).map(b => b.label)))];
+  const series = names.map(n => runs.map((r, i) => { const b = sel(r).find(x => x.label === n); return b && val(b) != null ? {i, v: val(b)} : null; }));
+  const max = graded ? 1 : Math.max(1, ...series.flat().filter(Boolean).map(p => p.v)), W = 640, H = 240, L = 40, B = 24;
+  const sx = i => L + (W - L - 12) * (i / (runs.length - 1)), sy = v => H - B - (H - B - 10) * (v / max);
+  let s = [0, .5, 1].map(t => `<line x1="${L}" x2="${W - 12}" y1="${sy(max * t)}" y2="${sy(max * t)}" stroke="currentColor" opacity=".12"/><text class="m" x="${L - 4}" y="${sy(max * t) + 4}" text-anchor="end">${graded ? Math.round(max * t * 100) + "%" : (max * t).toFixed(0) + "s"}</text>`).join("");
+  s += runs.map((r, i) => `<text class="m" x="${sx(i)}" y="${H - 6}" text-anchor="middle">${esc(r.id.slice(5, 14))}</text>`).join("");
+  series.forEach((pts, k) => { const p = pts.filter(Boolean); if (!p.length) return;
+    s += `<polyline fill="none" stroke="${COLORS[k % 9]}" stroke-width="2" points="${p.map(q => sx(q.i) + "," + sy(q.v)).join(" ")}"/>` + p.map(q => `<circle cx="${sx(q.i)}" cy="${sy(q.v)}" r="3.5" fill="${COLORS[k % 9]}"/>`).join(""); });
+  $("trend").innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%">${s}</svg><div>${names.map((n, k) => `<span class="tag" style="border-left:4px solid ${COLORS[k % 9]}">${esc(n)}</span>`).join("")}</div>`;
+}
+
+/* ---------------- 对比多次结果（任意数量，以其中一次为基准） ---------------- */
+const MAX_CMP = 12, LETTERS = "ABCDEFGHIJKL";
+function erfc(x) { const z = Math.abs(x), t = 1 / (1 + 0.5 * z);
+  const r = t * Math.exp(-z * z - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 + t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277)))))))));
+  return x >= 0 ? r : 2 - r; }
+function mwuP(a, b) {  // 与 core.py 的 mwu_p 同一算法
+  const n1 = a.length, n2 = b.length; if (n1 < 2 || n2 < 2) return null;
+  const all = [...a.map(v => [v, 0]), ...b.map(v => [v, 1])].sort((x, y) => x[0] - y[0]), ranks = new Array(all.length).fill(0); let i = 0, tie = 0;
+  while (i < all.length) { let j = i; while (j + 1 < all.length && all[j + 1][0] === all[i][0]) j++; for (let k = i; k <= j; k++) ranks[k] = (i + j) / 2 + 1; tie += (j - i + 1) ** 3 - (j - i + 1); i = j + 1; }
+  const u = all.reduce((s, x, k) => s + (x[1] === 0 ? ranks[k] : 0), 0) - n1 * (n1 + 1) / 2, n = n1 + n2, sigma2 = n1 * n2 / 12 * ((n + 1) - tie / (n * (n - 1)));
+  if (sigma2 <= 0) return 1; return erfc(Math.max((Math.abs(u - n1 * n2 / 2) - 0.5) / Math.sqrt(sigma2), 0) / Math.SQRT2);
+}
+const modelKey = l => { const i = l.indexOf("/"); return i < 0 ? l : l.slice(i + 1); };
+// 跨次测试的指纹对账：同模型（或单模型时视为同一行）在不同测试间的数值分布距离；直连 vs 中转对账的主用法
+function fpCompareRows(runs, L) {
+  const items = runs.map((r, i) => ({i, labs: (r.d.fingerprint && r.d.fingerprint.labels) || null})).filter(x => x.labs && Object.keys(x.labs).length);
+  if (items.length < 2) return [];
+  const single = items.every(x => Object.keys(x.labs).length === 1), groups = new Map();
+  items.forEach(x => Object.entries(x.labs).forEach(([lb, info]) => {
+    const k = single ? "模型" : modelKey(lb);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push({i: x.i, lb, info});
+  }));
+  const out = [];
+  groups.forEach((list, k) => {
+    const bi = list.find(x => x.i === cmpBase) || list[0];
+    list.forEach(x => {
+      if (x === bi) return;
+      const noise = Math.max(bi.info.self_dist || 0, x.info.self_dist || 0) / Math.SQRT2;
+      if (x.info.n_numbers < FP_MIN || bi.info.n_numbers < FP_MIN) {
+        out.push({key: k, i: x.i, bi: bi.i, v: "样本不足（不作判断）", txt: `${x.lb} vs ${L(bi.i)} 的 ${bi.lb}：有效数字不足（${bi.info.n_numbers}/${x.info.n_numbers}，至少 ${FP_MIN}），不作判断`});
+        return;
+      }
+      const dist = fpHellinger(bi.info.counts, x.info.counts), {thr, v} = fpVerdict(dist, noise);
+      out.push({key: k, i: x.i, bi: bi.i, v, txt: `${x.lb} vs ${L(bi.i)} 的 ${bi.lb}：距离 ${dist.toFixed(3)}（判定线 ${thr.toFixed(3)}）→ ${v}`});
+    });
+  });
+  return out;
+}
+// 每个指标：low = 越小越好；rate = 比例（差值用“个百分点”）；thr = 小于这个变化就当“基本持平”
+const METRICS = {
+  total: {name: "总耗时（中位数）", low: true, thr: .03, get: r => r.total && r.total.median, fmt: sec, vals: r => r.total_vals, rng: r => r.total},
+  ft: {name: "首字时间（中位数）", low: true, thr: .03, get: r => mostlyBuffered(r) ? null : r.first_token && r.first_token.median, fmt: sec, vals: r => r.first_token_vals, rng: r => r.first_token},
+  ok: {name: "成功率", rate: true, thr: .02, get: r => r.n ? r.ok / r.n : null, fmt: pf, ci: r => r.ok_ci},
+  pass: {name: "正确率", rate: true, thr: .02, get: r => r.pass_rate, fmt: pf, ci: r => r.pass_ci},
+  tps: {name: "输出速度（tokens/秒）", thr: .03, get: r => r.tps ? r.tps.median : null, fmt: v => v.toFixed(1), vals: r => r.tps_vals, rng: r => r.tps},
+  queue: {name: "排队时间（中位数）", low: true, thr: .05, get: r => r.queue_median, fmt: sec, vals: r => r.queue_vals, rng: r => r.queue,
+    note: "响应头到首个数据事件的等待：服务端/中转站内部排队，不是网络也不是模型。直连 vs 中转时，这里最能看出中转自己加了多久"},
+  gen: {name: "工具第二步生成（中位数）", low: true, thr: .05, get: r => r.gen ? r.gen.median : null, fmt: sec, vals: r => r.gen_vals, rng: r => r.gen,
+    note: "拿到工具结果后生成答案的时间，与单次请求的总耗时可比（两步合计看“总耗时”）"},
+};
+const KIND_TXT = {better: "更好", worse: "更差", same: "差异不明显", unk: "无法判断"};
+function cmpWarnings(ea, eb) {
+  const hard = [], soft = [];
+  if (!ea || !eb || ea.tool_version === "1.x" || eb.tool_version === "1.x") { soft.push("有一方是旧版结果，缺少环境信息，无法核对测试条件是否相同"); return {hard, soft}; }
+  if ((ea.effort || "") !== (eb.effort || "")) hard.push(`推理强度不同（基准：${ea.effort || "未指定"}，这次：${eb.effort || "未指定"}）`);
+  const fa = ea.prompt_fingerprints || {}, fb = eb.prompt_fingerprints || {};
+  const diff = Object.keys(fa).filter(k => k in fb && fa[k] !== fb[k]);
+  if (diff.length) hard.push(`提示词或背景内容不同（${diff.slice(0, 4).join("、")}${diff.length > 4 ? "…" : ""}）`);
+  if (!Object.keys(fa).some(k => k in fb)) hard.push("没有共同的测试题/场景");
+  if (ea.rounds !== eb.rounds) soft.push(`轮数不同（基准 ${ea.rounds}，这次 ${eb.rounds}），样本量不同`);
+  const apis = e => [...new Set((e.endpoints || []).map(x => x.api))].sort().join("+");
+  if (apis(ea) !== apis(eb)) soft.push(`接口类型不同（基准 ${apis(ea)}，这次 ${apis(eb)}）：responses 与 chat 的返回格式和计时点略有差异`);
+  return {hard, soft};
+}
+// 把某个指标上“这一次”和“基准”比：变化多少、是否显著、更好还是更差
+function evalCell(m, base, row) {
+  const v = row ? m.get(row) : null;
+  if (v == null) return {empty: true};
+  if (row === base) return {v, base: true};
+  const b = base ? m.get(base) : null;
+  if (b == null || (!m.rate && b === 0)) return {v, unknown: true};
+  const c = m.rate ? v - b : (v - b) / b, small = Math.abs(c) < m.thr;
+  let sig = null, basis = "";
+  const va = m.vals && m.vals(base), vb = m.vals && m.vals(row);
+  if (va && vb && va.length >= 4 && vb.length >= 4) { const p = mwuP(va, vb); sig = p < 0.05; basis = "p=" + p.toFixed(3); }
+  else if (m.ci && m.ci(base) && m.ci(row)) { const x = m.ci(base), y = m.ci(row); sig = x[1] < y[0] || y[1] < x[0]; basis = sig ? "区间不重叠" : "区间重叠"; }
+  else if (m.rng && m.rng(base) && m.rng(row)) { const x = m.rng(base), y = m.rng(row); sig = x.max < y.min || y.max < x.min; basis = sig ? "范围不重叠，样本少" : "范围重叠，样本少"; }
+  const better = m.low ? c < 0 : c > 0, pct = Math.abs(c * 100).toFixed(0);
+  const kind = small ? "same" : sig === false ? "same" : sig === null ? "unk" : better ? "better" : "worse";
+  const word = small ? (m.rate ? `相差 ${pct} 个百分点` : `相差 ${pct}%`)  // 变化很小就别说“快/慢”，更不会出现“慢 0%”
+    : m.rate ? `${c > 0 ? "高" : "低"} ${pct} 个百分点` : m.low ? `${c < 0 ? "快" : "慢"} ${pct}%` : `${c > 0 ? "高" : "低"} ${pct}%`;
+  return {v, c, sig, basis, kind, word, small, arrow: small ? "≈" : c > 0 ? "▲" : "▼"};
+}
+function cellHtml(m, e, tag) {
+  if (e.empty) return '<td class="mute">—</td>';
+  const val = m.fmt(e.v) + (tag ? `<div class="t">${esc(tag)}</div>` : "");
+  if (e.base) return `<td class="cmpcell base"><div class="v">${val}</div><div class="t"><b>基准</b></div></td>`;
+  if (e.unknown) return `<td class="cmpcell"><div class="v">${val}</div><div class="t">基准没有这项数据</div></td>`;
+  const label = e.kind === "same" && e.small ? "基本持平" : KIND_TXT[e.kind];
+  return `<td class="cmpcell ${e.kind}"><div class="v">${val}</div><div class="d">${e.arrow} ${e.word}</div><div class="t">${label}${e.basis ? " · " + esc(e.basis) : ""}</div></td>`;
+}
+// 同一场景下，把各次测试里“同一个模型”放到一行；每次测试在该场景只有一个模型时视为同一行（比如 A 平台 vs B 平台，模型名不同）
+function groupRows(runs, sc) {
+  const per = runs.map(r => r.d.summary.filter(x => x.scenario === sc));
+  const have = per.filter(rows => rows.length);
+  if (have.length < 2) return [];
+  if (have.every(rows => rows.length === 1)) return [{key: "各次测试里的模型", single: true, rows: per.map(rows => rows[0] || null)}];
+  const keyOf = (rows, r) => rows.filter(x => modelKey(x.label) === modelKey(r.label)).length > 1 ? r.label : modelKey(r.label);
+  const keys = [...new Set(per.flatMap(rows => rows.map(r => keyOf(rows, r))))];
+  return keys.map(k => ({key: k, rows: per.map(rows => rows.find(r => keyOf(rows, r) === k) || null)})).filter(g => g.rows.filter(Boolean).length >= 2);
+}
+let cmpRuns = [], cmpBase = 0, cmpMetric = "total";
+const baseIdx = g => g.rows[cmpBase] ? cmpBase : g.rows.findIndex(Boolean);  // 全局基准在这个场景/模型里没有数据时，临时用第一个有数据的测试当基准
+async function compareRuns() {
+  if (cmpSel.length < 2) return;
+  location.hash = "cmp=" + cmpSel.map(encodeURIComponent).join(",");
+  tab("compare"); $("cmpEmpty").classList.add("hidden"); $("cmpBody").innerHTML = "<div class='panel mute'>加载中…</div>";
+  try { const ds = await Promise.all(cmpSel.map(id => api("/api/run/" + encodeURIComponent(id)))); cmpRuns = ds.map((d, i) => ({id: cmpSel[i], d, name: (d.env && d.env.name) || ""})); }
+  catch (e) { $("cmpBody").innerHTML = `<div class="panel err">${esc(e.message)}</div>`; return; }
+  cmpBase = 0; cmpMetric = ""; renderCompare();
+}
+function renderCompare() {
+  const runs = cmpRuns, base = runs[cmpBase], L = i => LETTERS[i];
+  const scs = [...new Set(runs.flatMap(r => r.d.summary.map(x => x.scenario)))].filter(sc => groupRows(runs, sc).length);
+  const groups = scs.flatMap(sc => groupRows(runs, sc).map(g => Object.assign({sc}, g)));
+  // 1. 各次测试
+  let html = `<div class="panel"><div class="row" style="margin-top:0"><b style="font-size:16px">对比 ${runs.length} 次测试</b><span class="mute">每个数字都和基准 <b>${L(cmpBase)}</b> 比；想换基准点“设为基准”</span></div><div class="runs">` + runs.map((r, i) => {
+    const e = r.d.env || {}, sc = (e.scenarios || []).map(scName).join("、") || "旧版（自定义提示词）";
+    return `<div class="runcard ${i === cmpBase ? "base" : ""}"><b>${L(i)}</b> ${esc(r.name || r.id)}<div class="mute">${esc(r.id)}${e.created ? " · " + esc(e.created.replace("T", " ")) : ""}</div>
+      <div class="mute">${esc(sc)} · 轮数 ${e.rounds ?? "-"} · 推理强度 ${esc(e.effort || "未指定")}</div>${i === cmpBase ? '<span class="tag">基准</span>' : `<button class="ghost sm" data-base="${i}">设为基准</button>`}</div>`; }).join("") + "</div></div>";
+  // 2. 条件不同的提醒
+  const hardNotes = [], softNotes = [];
+  runs.forEach((r, i) => { if (i === cmpBase) return; const w = cmpWarnings(base.d.env, r.d.env); w.hard.forEach(t => hardNotes.push(`${L(i)} 与基准 ${L(cmpBase)}：${t}`)); w.soft.forEach(t => softNotes.push(`${L(i)}：${t}`)); });
+  if (hardNotes.length) html += `<div class="warnbox"><b>⚠ 不可直接比较</b>：测试条件不同，差值可能不是模型本身造成的，结论仅供参考。<br>${hardNotes.map(esc).join("<br>")}</div>`;
+  if (softNotes.length) html += `<div class="infobox">${[...new Set(softNotes)].map(esc).join("<br>")}</div>`;
+  // 2.5 模型指纹对账（跨次测试，直连 vs 中转看这里）
+  const fpRows = fpCompareRows(runs, L);
+  if (fpRows.length) html += `<div class="panel"><h3 style="margin-top:0">模型指纹对账（跨次测试）</h3>` + fpRows.map(r => `<div>${esc(r.txt)} ${fpTag(r.v)}</div>`).join("") +
+    `<div class="mute" style="font-size:11.5px;margin-top:4px">数值分布 Hellinger 距离，判定线由各次自身的抽样噪声决定。指纹是启发式证据，不是身份认证；“不一致”只说明输出分布差异超出抽样噪声，也可能与上游路由、服务降级或方法局限有关。</div></div>`;
+  // 3. 怎么看
+  html += `<div class="panel legend"><b>怎么看这张对比</b><ul>
+    <li><b>基准</b>是拿来比的那一次（现在是 <b>${L(cmpBase)}</b>），它那一格写“基准”；其余每格显示数值、比基准变化了多少、是更好还是更差。</li>
+    <li><b>越小越好</b>：总耗时、首字时间 —— ▼ 变小 = 更快 = <span class="fast">更好</span>；<b>越大越好</b>：成功率、正确率、输出速度 —— ▲ 变大 = <span class="fast">更好</span>。</li>
+    <li>格子颜色：<span class="fast">绿 = 更好</span>，<span class="slow">红 = 更差</span>，灰 = 差异不明显（可能只是随机波动，别当成真的变好或变差）。</li>
+    <li>“显著”的判断：每边至少 4 个样本时做统计检验（p&lt;0.05 才算显著）；成功率/正确率看 95% 区间是否重叠；样本更少时只看范围是否重叠。变化小于 3%（比例类 2 个百分点）直接算“基本持平”。</li></ul></div>`;
+  // 4. 结论
+  html += verdictHtml(groups, hardNotes.length > 0, fpRows);
+  // 5. 指标切换 + 表格
+  const usable = Object.keys(METRICS).filter(k => groups.some(g => g.rows.some(r => r && METRICS[k].get(r) != null)));
+  if (!usable.includes(cmpMetric)) cmpMetric = usable.includes("pass") ? "pass" : usable[0] || "total";  // 有判分的测试（题库等）默认先看正确率
+  html += `<div class="chips" style="margin-top:14px">${usable.map(k => `<button data-metric="${k}" class="${k === cmpMetric ? "on" : ""}">${METRICS[k].name}</button>`).join("")}</div>`;
+  const m = METRICS[cmpMetric];
+  html += `<div class="mute" style="margin:-4px 0 6px">${m.low ? "越小越好" : "越大越好"}（当前指标：${m.name}）</div>`;
+  const skipped = [];
+  for (const sc of scs) {
+    const gs = groups.filter(g => g.sc === sc && g.rows.some(r => r && m.get(r) != null));
+    if (!gs.length) { skipped.push(scName(sc)); continue; }
+    html += `<div class="panel"><h3 style="margin-top:0">${esc(scName(sc))}</h3><div style="overflow:auto"><table class="cmptbl nw"><tr><th>模型</th>${runs.map((r, i) => `<th>${L(i)}${i === cmpBase ? "（基准）" : ""}<div class="mute" style="font-weight:400">${esc(r.name || "")}</div></th>`).join("")}</tr>` +
+      gs.map(g => { const bi = baseIdx(g); return `<tr><td>${esc(g.key)}${bi !== cmpBase ? `<div class="mute" style="font-size:11.5px">${L(cmpBase)} 没有这项，临时以 ${L(bi)} 为基准</div>` : ""}</td>${g.rows.map(r => cellHtml(m, evalCell(m, g.rows[bi], r), g.single && r ? r.label : "")).join("")}</tr>`; }).join("") + "</table></div></div>";
+  }
+  if (skipped.length) html += `<div class="infobox">【${skipped.map(esc).join("、")}】没有“${m.name}”这项数据，所以上面没有它的表；点上面的其他指标可以看到。</div>`;
+  if (!usable.length) html += `<div class="panel"><div class="empty-note"><b>这几次测试没有可以逐项比较的数据</b>
+    <div class="mute" style="margin-top:6px;line-height:1.8">逐项比较要求“同一个模型 + 同一个场景”在至少两次测试里都出现。常见原因：<br>
+    ① 两次测的不是同一个模型（模型名按忽略接口名的方式配对，<code>codeapi/gpt-6</code> 与 <code>other/gpt-6</code> 算同一个）；<br>
+    ② 测的场景不同（比如一次只测速度、一次只测题库）；<br>
+    ③ 其中一次全部请求失败，没有任何成功数据。<br>
+    想对比 A、B 两个平台时：两次都用<b>同一个场景、同一个模型名</b>各测一次，再在这里勾选对比。</div></div></div>`;
+  $("cmpBody").innerHTML = html;
+  $("cmpBody").querySelectorAll("[data-base]").forEach(b => b.onclick = () => { cmpBase = +b.dataset.base; renderCompare(); });
+  $("cmpBody").querySelectorAll("[data-metric]").forEach(b => b.onclick = () => { cmpMetric = b.dataset.metric; renderCompare(); });
+}
+// 自动结论：先给“一句话”，再给最大改善/退步，再按场景和模型逐条说明
+function verdictHtml(groups, hasHard, fpRows) {
+  const runs = cmpRuns, base = cmpBase, L = i => LETTERS[i], counts = {better: 0, worse: 0, same: 0, unk: 0}, items = [], lines = [];
+  for (const g of groups) {
+    const bi = baseIdx(g), br = g.rows[bi]; if (!br) continue;
+    const segs = [];
+    for (const k of ["total", "ft", "tps", "ok", "pass"]) {
+      const m = METRICS[k]; if (m.get(br) == null) continue;
+      const ev = g.rows.map((r, i) => i === bi ? null : {i, e: evalCell(m, br, r)}).filter(x => x && !x.e.empty && !x.e.unknown);
+      if (!ev.length) continue;
+      ev.forEach(x => { counts[x.e.kind]++; items.push(Object.assign({g, k, m, bi}, x)); });
+      if (ev.every(x => x.e.kind === "same")) { if (k === "total" || k === "pass") segs.push(`${m.name}：各次与基准差异不明显`); continue; }
+      segs.push(`${m.name}：` + ev.map(x => `${L(x.i)} ${x.e.word}（${x.e.kind === "same" ? "差异不明显" : KIND_TXT[x.e.kind] + (x.e.basis ? "，" + x.e.basis : "")}）`).join("；"));
+    }
+    for (const k of ["queue", "gen"]) {  // 口径说明型指标：单独列出，不进“显著更好/更差”计数（排队差异通常是链路问题，不是模型差异）
+      const m = METRICS[k]; if (m.get(br) == null) continue;
+      const ev = g.rows.map((r, i) => i === bi ? null : {i, e: evalCell(m, br, r)}).filter(x => x && !x.e.empty && !x.e.unknown);
+      if (!ev.length) continue;
+      if (ev.some(x => x.e.kind !== "same")) segs.push(`${m.name}：` + ev.map(x => `${L(x.i)} ${x.e.word}`).join("；") + "（口径：" + m.note + "）");
+    }
+    if (segs.length) lines.push(`【${scName(g.sc)}】${g.single ? "" : g.key}${bi !== base ? `（以 ${L(bi)} 为基准）` : ""}${g.single && bi === base ? "" : "："}${segs.join("　|　")}`);
+  }
+  const total = counts.better + counts.worse + counts.same + counts.unk;
+  if (!total) return `<div class="verdict"><div class="head">结论</div>这几次测试没有可以逐项比较的共同模型/场景。</div>`;
+  const best = items.filter(x => x.e.kind === "better").sort((a, b) => Math.abs(b.e.c) - Math.abs(a.e.c))[0], worst = items.filter(x => x.e.kind === "worse").sort((a, b) => Math.abs(b.e.c) - Math.abs(a.e.c))[0];
+  const desc = x => `${L(x.i)}（${runs[x.i].name || runs[x.i].id}）${x.g.single ? "" : "的 " + x.g.key} 在【${scName(x.g.sc)}】的${x.m.name}，比基准 ${L(x.bi)} ${x.e.word}（${KIND_TXT[x.e.kind]}${x.e.basis ? "，" + x.e.basis : ""}）`;
+  let head = `相对基准 ${L(base)}，共比较 ${total} 项：<b class="fast">显著更好 ${counts.better} 项</b>，<b class="slow">显著更差 ${counts.worse} 项</b>，差异不明显 ${counts.same} 项${counts.unk ? "，无法判断 " + counts.unk + " 项（样本太少）" : ""}。`;
+  let verdict = counts.better && !counts.worse ? "整体：没有变差的项，有明确变好的项。" : counts.worse && !counts.better ? "整体：没有变好的项，有明确变差的项。" : counts.better && counts.worse ? "整体：有变好也有变差，要看你更在意哪个指标。" : "整体：各次之间没有统计上可靠的差别，可以认为表现相当。";
+  const out = [`<div class="head">结论</div>${hasHard ? "⚠ 部分测试条件不同，以下结论仅供参考。\n" : ""}${head}\n${verdict}`];
+  if (best) out.push(`最大改善：${esc(desc(best))}`);
+  if (worst) out.push(`最大退步：${esc(desc(worst))}`);
+  if (fpRows && fpRows.length) out.push("模型指纹对账：" + fpRows.map(r => `${L(r.i)} vs ${L(r.bi)} ${r.v}`).join("；") + "（启发式证据，不是身份认证）");
+  if (lines.length) out.push("逐项：\n" + lines.slice(0, 14).map(esc).join("\n") + (lines.length > 14 ? `\n…其余 ${lines.length - 14} 条见下方表格` : ""));
+  return `<div class="verdict">${out.join("\n")}</div>`;
+}
+
+/* ---------------- 合并检验：把多次测试的样本合起来算 ---------------- */
+let mergeData = null;
+async function mergeRuns() {
+  if (cmpSel.length < 2) return;
+  tab("merge");
+  $("mergeEmpty").classList.add("hidden");
+  $("mergeBody").innerHTML = "<div class='panel mute'>合并中…</div>";
+  try {
+    mergeData = await api("/api/merge", {ids: cmpSel});
+    renderMerge();
+  } catch (e) {
+    mergeData = null;
+    $("mergeBody").innerHTML = `<div class="panel err">${esc(e.message)}</div>`;
+  }
+}
+function renderMerge() {
+  const d = mergeData;
+  if (!d) return;
+  const rows = d.rows || [], L = r => esc(r.label);
+  let html = `<div class="panel"><div class="row" style="margin-top:0">
+    <b style="font-size:13px">合并 ${d.runs_meta.length} 次测试 · ${d.total_requests} 个请求</b>
+    <span class="mute" style="font-size:11.5px">${d.runs_meta.map(r => esc(r.id)).join("、")}</span></div>
+    <div class="mute" style="font-size:12px;margin-top:6px;line-height:1.8">把条件相同的请求合在一起后重算。样本量越大，“差异不明显”越可信、“显著”越可靠。
+    看“每组样本数”就知道合并后每行用了多少次请求。</div></div>`;
+
+  // 条件不同被拆开的提醒
+  if ((d.warnings || []).length) html += `<div class="warnbox"><b>⚠ 部分结果未被合并</b><br>${d.warnings.map(esc).join("<br>")}</div>`;
+  if ((d.missing || []).length) html += `<div class="warnbox">以下结果缺少条件信息或已删除，未参与合并：${d.missing.map(esc).join("、")}</div>`;
+
+  // 合并后的结论
+  html += `<div class="verdict"><div class="head">合并后的结论</div>${esc(d.conclusion || "没有可比较的数据")}</div>`;
+
+  // 合并后总表：强调“样本数”
+  const showCols = r => r;
+  html += `<div class="panel"><h3 style="margin-top:0">合并后的统计</h3><div style="overflow:auto"><table class="nw">
+    <tr><th>模型</th><th>场景</th><th>条件</th><th>每组样本</th><th>成功率</th><th>正确率</th><th>总耗时 中位</th><th>首字 中位</th><th>tokens/s</th><th>每千 tokens 耗时</th><th>来源测试</th></tr>` +
+    rows.map(r => `<tr><td>${esc(r.label)}</td><td>${esc(scName(r.scenario))}</td><td class="mute" style="font-size:11.5px">${esc(r.merged_cond || "")}</td>
+      <td><b>${r.n}</b>${r.low_sample ? ' <span class="tag warn">样本不足</span>' : ''}</td>
+      <td>${r.ok}/${r.n}${r.ok_ci ? ` <span class="mute">(${ciText(r.ok_ci)})</span>` : ''}</td>
+      <td>${r.pass_rate == null ? "-" : `${r.pass_n}/${r.graded} ${pf(r.pass_rate)}`}</td>
+      <td>${sec(r.total && r.total.median)}</td>
+      <td>${sec(r.first_token && r.first_token.median)}</td>
+      <td>${r.tps ? r.tps.median : (r.tps_overall ? r.tps_overall.median + "（含等待）" : "-")}</td>
+      <td>${r.sec_per_1k ? sec(r.sec_per_1k.median) : "-"}</td>
+      <td>${(r.merged_runs || []).map(esc).join("<br>")}<div class="mute" style="font-size:11px">各 ${(r.merged_n_per_run || []).join("/")} 个请求</div></td></tr>`).join("") +
+    `</table></div></div>`;
+
+  $("mergeBody").innerHTML = html;
+}
+
+async function openRun(id) {
+  const d = await api("/api/run/" + encodeURIComponent(id));
+  show({id: d.legacy ? id : id, rows: d.summary, records: d.records, conclusion: d.conclusion, env: d.env, fingerprint: d.fingerprint}, `测试结果 ${id}` + (d.legacy ? "（旧版）" : ""));
+  location.hash = "run=" + encodeURIComponent(id); tab("result");
+}
+
+/* ---------------- 自检 ---------------- */
+$("stRun").onclick = async () => {
+  $("stRun").disabled = true; $("stOut").innerHTML = "<span class='mute'>运行中，约 10 秒…</span>";
+  try {
+    const {checks} = await api("/api/selftest", {});
+    $("stOut").innerHTML = `<div class="${checks.every(c => c.ok) ? "ok" : "err"}"><b>${checks.filter(c => c.ok).length}/${checks.length} 项通过</b></div><table>` +
+      checks.map(c => `<tr><td class="${c.ok ? "ok" : "err"}">${c.ok ? "通过" : "失败"}</td><td>${esc(c.name)}</td><td class="mute">${esc(c.detail)}</td></tr>`).join("") + "</table>";
+  } catch (e) { $("stOut").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+  $("stRun").disabled = false;
+};
+
+/* ---------------- 初始化 ---------------- */
+PRESETS.forEach(p => { const b = document.createElement("button"); b.className = "ghost sm"; b.textContent = p.length > 12 ? p.slice(0, 12) + "…" : p; b.title = p; b.onclick = () => { $("prompt").value = p; savePrm(); }; $("presets").appendChild(b); });
+$("addEp").onclick = () => showForm(null); $("f_cancel").onclick = () => $("epForm").classList.add("hidden"); $("f_save").onclick = saveEp;
+$("impEp").onclick = async () => { try { const r = await api("/api/endpoints/import", {}); await loadEndpoints(); $("epMsg").className = "msg ok"; $("epMsg").textContent = `已导入 ${r.imported} 个供应商；接口类型为“自动”的请点“探测模型”确认。`; } catch (e) { $("epMsg").className = "msg err"; $("epMsg").textContent = e.message; } };
+$("run").onclick = start; $("stop").onclick = () => api("/api/stop", {});
+$("mfilter").oninput = renderModels; $("trendSc").onchange = () => { trendConds(); trend(); }; $("trendCond").onchange = trend; $("cmpBtn").onclick = compareRuns; $("mergeBtn").onclick = mergeRuns;
+$("cmpAll").onclick = () => { cmpSel = historyRuns.slice(0, MAX_CMP).map(r => r.id).reverse(); syncCmp(); };  // 历史是新→旧，反过来让最早的一次当基准
+$("cmpClear").onclick = () => { cmpSel = []; syncCmp(); };
+["rounds", "gap"].forEach(i => $(i).oninput = () => { updateEst(); savePrm(); });
+["prompt", "context", "timeout", "warmup", "effort"].forEach(i => $(i).onchange = () => { savePrm(); if (i === "warmup") updateEst(); });
+$("useName").onchange = () => { nameUi(); savePrm(); }; $("runName").oninput = () => { nameUi(); savePrm(); };
+
+(async () => {
+  try { cfg = await api("/api/config"); $("ver").textContent = "v" + cfg.version; } catch (e) {}
+  if (cfg.defaults) ["rounds", "timeout", "gap"].forEach(k => { $(k).value = cfg.defaults[k]; });  // 默认值和上限来自 config.json；本机保存过的参数优先
+  if (cfg.max_rounds) $("rounds").max = cfg.max_rounds;
+  if (cfg.max_timeout) $("timeout").max = cfg.max_timeout;
+  const prm = store.get("prm", {}); for (const k of ["prompt", "context", "rounds", "timeout", "gap"]) if (prm[k] != null) $(k).value = prm[k]; if (prm.warmup === false) $("warmup").checked = false; $("effort").value = prm.effort || "";
+  $("useName").checked = !!prm.useName; $("runName").value = prm.runName || ""; nameUi();
+  selected = new Set(store.get("sel", [])); chosenSc = new Set(store.get("sc", ["speed"]));
+  renderScen();
+  try { await loadEndpoints(); } catch (e) { $("eps").textContent = "读取接口失败：" + e.message; }
+  updateEst();
+  await loadHistory().catch(() => {});
+  const j = await api("/api/job");
+  if (j.state === "running" || j.state === "starting") { setRunning(true); polling = setInterval(poll, 800); }
+  const m = location.hash.match(/run=(.+)/);
+  if (m) openRun(decodeURIComponent(m[1])).catch(() => {});
+  const mc = location.hash.match(/cmp=(.+)/);
+  if (mc) { cmpSel = mc[1].split(",").map(decodeURIComponent).filter(Boolean).slice(0, MAX_CMP); if (cmpSel.length >= 2) compareRuns(); }
+})();
+</script>
+</body>
+</html>
