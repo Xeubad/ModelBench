@@ -735,13 +735,16 @@ class Config(unittest.TestCase):
         self.assertEqual(config.resolve("/tmp/y"), "/tmp/y")
 
     def test_shipped_config_files_are_valid_and_equal_defaults(self):
-        for name in ("config.json", "config.example.json"):
-            p = os.path.join(config.ROOT, name)
-            self.assertTrue(os.path.isfile(p), name)
-            self.assertIsInstance(config.load(p), dict, name + " 应该能通过校验")
-        # 只有示例文件必须和内置默认一致；config.json 是用户工作配置，允许按需改（如端口避开 18888）
-        c = config.load(os.path.join(config.ROOT, "config.example.json"))
+        # config.example.json 必须存在且与内置默认同步
+        ex = os.path.join(config.ROOT, "config.example.json")
+        self.assertTrue(os.path.isfile(ex), "config.example.json 应随仓库提供")
+        self.assertIsInstance(config.load(ex), dict, "config.example.json 应该能通过校验")
+        c = config.load(ex)
         self.assertEqual({k: c[k] for k in config.DEFAULTS}, config.DEFAULTS, "config.example.json 与内置默认不一致（示例文件应保持同步）")
+        # config.json 是本机配置，不入仓库（公开仓库 clone 后本来就没有），存在时才校验其合法性
+        own = os.path.join(config.ROOT, "config.json")
+        if os.path.isfile(own):
+            self.assertIsInstance(config.load(own), dict, "config.json 应该能通过校验")
 
     def test_server_limits_come_from_config(self):
         self.assertEqual((server.MAX_ROUNDS, server.MAX_REQUESTS), (config.CFG["limits"]["max_rounds"], config.CFG["limits"]["max_requests"]))
