@@ -1,5 +1,8 @@
 # ModelBench · 模型测试平台
 
+[![tests](https://github.com/Xeubad/ModelBench/actions/workflows/tests.yml/badge.svg)](https://github.com/Xeubad/ModelBench/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > 给任意 OpenAI 兼容接口做一次**可信**的体检：延迟、吞吐、正确率、工具调用、上下文召回、模型指纹。
 > 零依赖（纯 Python 标准库），本机运行，单页网页 + 命令行。
 

@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 单元测试 + 仪器自检 (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 项目零依赖（只用标准库），不需要 pip install
+      - name: 单元测试（68 项，全程本机假服务，不访问真实接口）
+        run: python3 -m model_test test
+
+      - name: 仪器自检（验证平台测时间/分类状态码是否准）
+        run: python3 -m model_test selftest
