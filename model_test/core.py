@@ -8,11 +8,12 @@
 - 计时拆开：连接、响应头、首个事件、首个思考、首个正文字、总耗时、输出速度（tokens/秒）。
 - 场景：speed（自定义提示词）、quiz（10 道有标准答案的题，自动判分）、tool（两步工具调用，含把 reasoning 项回放）、
   needle10k / needle30k（大海捞针）。判分只用精确匹配、正则、JSON 比对，不让模型自评。
-- 统计：中位数、p95、最小、最大；样本 < 5 标“样本不足”；成功率和正确率附 Wilson 95% 置信区间；题库另算一致性。
+- 统计：中位数、p95、最小、最大；样本 < 5 标“样本不足”；固定题集仅报告描述性正确率和一致性。
 不改任何 OpenClaw 配置，不经过网关，不走终端代理，不保存密钥。
 时间度量一律用单调时钟 time.perf_counter()（不受系统校时影响），只有记录“几点几分”用墙上时钟。
 """
 import datetime as dt
+import concurrent.futures
 import hashlib
 import http.client
 import json
@@ -26,11 +27,13 @@ import threading
 import time
 import urllib.parse
 
-VERSION = "2.5.0"
-SCHEMA_VERSION = 2
+VERSION = "2.8.0"
+SCHEMA_VERSION = 3
+METHOD_VERSION = "4"  # 变更请求、判分或测量口径时更新，旧结果不自动合并
 CONTEXT_CHOICES = (0, 10000, 30000)  # 自定义提示词前的背景文字长度（约 tokens）；0 = 不加
 LOW_SAMPLE = 5
 P95_MIN_N = 20  # 样本少于这个数，p95 基本等于最大值，不展示
+SLO_SECONDS = 10  # 描述性口径：10 秒内最终完成且有判分时答对
 BUFFER_MIN_TOTAL = 3.0  # 总耗时达到这个秒数才判断“非流式”（太短的请求流式与否分不出）
 EFFORTS = ("", "low", "medium", "high")  # 推理强度；空 = 不指定，由模型自己决定
 # 固定采样参数：让“同一模型在不同接口/中转”之间可比（否则差异可能来自接口默认值而不是模型）。
@@ -45,9 +48,11 @@ SCENARIOS = {
     "speed": "自定义提示词（速度）",
     "gen": "生成速度（固定约 300 字）",
     "quiz": "题库（正确率）",
+    "quiz_extended": "多领域题集（8题）",
     "tool": "工具调用（两步）",
     "needle10k": "大海捞针（约 1 万 tokens）",
     "needle30k": "大海捞针（约 3 万 tokens）",
+    "needle_matrix": "长上下文矩阵（12题，费用较高）",
     "fingerprint": "模型指纹（数值分布对账）",
 }
 _FILLER_UNIT = "长汀县汀江流域河田段农业面源污染治理项目采用MET混合滤料包与土建安装相结合的方式，招标文件要求投标人提供CMA检测报告并加盖公章。"  # 约 41 tokens
@@ -61,8 +66,8 @@ QUIZ = [
      "chk": ("re", r"1386500\.50?"), "ans": "1386500.50"},
     {"id": "q03", "name": "JSON 格式", "prompt": "只输出一个 JSON 对象，不要代码块和任何其他文字：name 为“张三”，age 为数字 30。",
      "chk": ("json", {"name": "张三", "age": 30}), "ans": '{"name": "张三", "age": 30}', "strict": True},
-    {"id": "q04", "name": "指令遵循", "prompt": "请只输出三种水果的中文名，用英文逗号分隔，不要有其他任何文字、空格或标点。",
-     "chk": ("re", r"[^,，。\s]+(,[^,，。\s]+){2}"), "ans": "苹果,香蕉,橙子"},
+    {"id": "q04", "name": "指令遵循", "prompt": "请只输出苹果、香蕉、橙子这三种水果的名称，用英文逗号分隔，顺序不限，不要有其他任何文字、空格或标点。",
+     "chk": ("set", ["苹果", "香蕉", "橙子"]), "ans": "苹果,香蕉,橙子", "strict": True},
     {"id": "q05", "name": "千分位不拆列", "prompt": "按竖线 | 拆分成列，输出 JSON 字符串数组，不要代码块和其他文字：设备名称|1,200.00|台",
      "chk": ("json", ["设备名称", "1,200.00", "台"]), "ans": '["设备名称", "1,200.00", "台"]', "strict": True},
     {"id": "q06", "name": "算术", "prompt": "17 乘以 23 等于多少？只输出数字。", "chk": ("re", r"391"), "ans": "391"},
@@ -71,18 +76,27 @@ QUIZ = [
     {"id": "q08", "name": "逻辑推理", "prompt": "小明比小红高，小红比小刚高。三个人里最矮的是谁？只输出名字。", "chk": ("re", r"小刚"), "ans": "小刚"},
     {"id": "q09", "name": "日期抽取", "prompt": "招标文件规定：投标保证金为人民币伍万元整，开标时间为2026年11月3日上午9时30分。请只输出开标日期，格式 YYYY-MM-DD。",
      "chk": ("re", r"2026-11-03"), "ans": "2026-11-03"},
-    {"id": "q10", "name": "严格输出", "prompt": "请只回复一个大写字母 A，不要有其他任何字符。", "chk": ("re", r"A"), "ans": "A"},
+    {"id": "q10", "name": "严格输出", "prompt": "请只回复一个大写字母 A，不要有其他任何字符。", "chk": ("re", r"A"), "ans": "A", "strict": True},
+]
+QUIZ_EXTENDED = [
+    {"id": "e01", "name": "百分比计算", "prompt": "原价 240 元，打八折后是多少元？只输出数字。", "chk": ("re", r"192"), "ans": "192"},
+    {"id": "e02", "name": "单位换算", "prompt": "3.5 小时等于多少分钟？只输出数字。", "chk": ("re", r"210"), "ans": "210"},
+    {"id": "e03", "name": "集合逻辑", "prompt": "所有方块都是图形，甲是方块。甲是不是图形？只输出是或否。", "chk": ("re", r"是"), "ans": "是"},
+    {"id": "e04", "name": "日期边界", "prompt": "2024 年 2 月 28 日的下一天是哪一天？只输出 YYYY-MM-DD。", "chk": ("re", r"2024-02-29"), "ans": "2024-02-29"},
+    {"id": "e05", "name": "英文阅读", "prompt": "Read: The red box is empty. The blue box contains a key. Which box contains the key? Reply with only its color in lowercase English.", "chk": ("re", r"blue"), "ans": "blue", "strict": True},
+    {"id": "e06", "name": "数组处理", "prompt": "对数字 3,1,2 从小到大排序，仅输出 JSON 数组。", "chk": ("json", [1, 2, 3]), "ans": "[1,2,3]", "strict": True},
+    {"id": "e07", "name": "否定识别", "prompt": "记录：会议不在周二举行，改为周三。会议在哪天举行？只输出星期几。", "chk": ("re", r"(星期三|周三)"), "ans": "周三"},
+    {"id": "e08", "name": "信息缺失", "prompt": "记录中只有：小王有两支笔。小王的笔是什么颜色？如果未提及，只输出未知。", "chk": ("re", r"未知"), "ans": "未知", "strict": True},
 ]
 GEN_PROMPT = "请写一段约 300 字的中文，说明污水处理中 A/O（缺氧/好氧）工艺的基本原理。直接写正文，不要标题和列表。"
 TOOL_DEF = {"name": "lookup_price", "description": "查询某种材料的单价",
             "parameters": {"type": "object", "properties": {"item": {"type": "string", "description": "材料名称"}}, "required": ["item"]}}
-TOOL_PROMPT = "请调用工具查询“MET混合滤料包”的单价，拿到结果后告诉我单价是多少（给出数字和单位即可）。"
+TOOL_PROMPT = '请调用工具查询“MET混合滤料包”的单价。拿到结果后只输出 JSON 对象，恰好包含数字 price 和字符串 unit 两个字段，不要其他内容。'
 TOOL_RESULT = {"item": "MET混合滤料包", "price": 128.5, "unit": "元/包"}
 
 # ---------------------------------------------------------------- 模型指纹（数值分布对账）
 # 思路参考开源项目 ModelTrace（MIT）与 meow-llm-detector（只借思想、自写实现、不引入依赖）：
-# 让模型输出无语义随机整数，用数值分布的 Hellinger 距离判断“是不是同一个模型”——典型用法是
-# 同一模型“直连官方 vs 走中转”各测一次，在“对比”里看指纹距离，对账中转有没有偷换模型。
+# 输出数值分布的 Hellinger 距离仅作启发式描述，阈值未经真实模型校准，不可认证身份。
 FP_COUNT = 40          # 每条挑战让模型输出的整数个数
 FP_RANGE = (1, 355)    # 整数取值范围
 FP_BINS = 20           # 把 [1, 355] 分成多少个等宽区间统计分布
@@ -217,7 +231,13 @@ def _new_rec(ep, model, api):
             "label": label_of(ep, model), "api": api, "ok": False, "status": None, "error": "", "reused": None, "first_reused": None,
             "connect_s": None, "headers_s": None, "first_event_s": None, "first_think_s": None, "first_token_s": None,
             "total_s": None, "tps": None, "tps_overall": None, "buffered": False, "non_stream": False, "queue_s": None,
-            "reasoning_tokens": None, "response_status": None, "text": "", "tool_calls": [], "usage": None, "events": []}
+             "reasoning_tokens": None, "response_status": None, "text": "", "tool_calls": [], "usage": None, "events": []}
+
+
+def _chat_cached_tokens(usage):
+    if usage.get("prompt_cache_hit_tokens") is not None:
+        return usage["prompt_cache_hit_tokens"]
+    return (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
 
 
 def _consume(rec, ev, api, acc, now):
@@ -233,12 +253,14 @@ def _consume(rec, ev, api, acc, now):
             rec["first_token_s"] = now
 
     if api == "chat":
+        rec["returned_model"] = ev.get("model") or rec.get("returned_model")
+        rec["system_fingerprint"] = ev.get("system_fingerprint") or rec.get("system_fingerprint")
         if ev.get("error"):
             rec["error"] = clip(json.dumps(ev["error"], ensure_ascii=False))
         if ev.get("usage"):
             u = ev["usage"]
             rec["usage"] = {"input_tokens": u.get("prompt_tokens"), "output_tokens": u.get("completion_tokens"),
-                            "cached_tokens": u.get("prompt_cache_hit_tokens") or (u.get("prompt_tokens_details") or {}).get("cached_tokens"),
+                            "cached_tokens": _chat_cached_tokens(u),
                             "reasoning_tokens": (u.get("completion_tokens_details") or {}).get("reasoning_tokens")}
         choice = (ev.get("choices") or [{}])[0]
         delta = choice.get("delta") or {}
@@ -258,6 +280,9 @@ def _consume(rec, ev, api, acc, now):
             rec["response_status"] = "completed" if choice["finish_reason"] in ("stop", "tool_calls") else "incomplete"
         return
     kind = ev.get("type")
+    if isinstance(ev.get("response"), dict):
+        rec["returned_model"] = ev["response"].get("model") or rec.get("returned_model")
+        rec["system_fingerprint"] = ev["response"].get("system_fingerprint") or rec.get("system_fingerprint")
     if kind == "response.output_text.delta":
         token()
         acc["text"].append(ev.get("delta", ""))
@@ -267,6 +292,8 @@ def _consume(rec, ev, api, acc, now):
         acc["items"].append(ev["item"])
     elif kind in ("response.completed", "response.incomplete", "response.failed"):
         r = ev.get("response", {})
+        rec["returned_model"] = r.get("model") or rec.get("returned_model")
+        rec["system_fingerprint"] = r.get("system_fingerprint") or rec.get("system_fingerprint")
         rec["response_status"] = r.get("status")
         rec["usage"] = r.get("usage")
         if r.get("output"):
@@ -280,6 +307,8 @@ def _consume(rec, ev, api, acc, now):
 def _consume_json_body(rec, acc, api, payload):
     """中转站忽略 stream:true 时返回 application/json 一次性响应。正常解析出正文/工具调用/usage，
     标 non_stream=True（首字不是真首字，与 buffered 同口径）。没有这一步，这类中转站会被误判成“流在完成事件之前断开”。"""
+    rec["returned_model"] = payload.get("model")
+    rec["system_fingerprint"] = payload.get("system_fingerprint")
     if api == "chat":
         choice = (payload.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
@@ -292,11 +321,11 @@ def _consume_json_body(rec, acc, api, payload):
         rec["response_status"] = "completed" if choice.get("finish_reason") in ("stop", "tool_calls") else "incomplete"
         u = payload.get("usage") or {}
         rec["usage"] = {"input_tokens": u.get("prompt_tokens"), "output_tokens": u.get("completion_tokens"),
-                        "cached_tokens": u.get("prompt_cache_hit_tokens") or (u.get("prompt_tokens_details") or {}).get("cached_tokens"),
+                        "cached_tokens": _chat_cached_tokens(u),
                         "reasoning_tokens": (u.get("completion_tokens_details") or {}).get("reasoning_tokens")}
         return
     out = payload.get("output") or payload.get("output_text") or []
-    rec["response_status"] = payload.get("status") or "completed"
+    rec["response_status"] = payload.get("status")
     rec["usage"] = payload.get("usage")
     acc["items"] = out
     texts = [(o.get("text") or "") for o in out if isinstance(o, dict) and o.get("type") == "message" for o in o.get("content") or []]
@@ -306,20 +335,24 @@ def _consume_json_body(rec, acc, api, payload):
 
 
 def stream_request(pool, ep, body, timeout):
-    """发一次流式请求（不重试）。例外：复用连接上的请求失败（服务端已把这条 keep-alive 连接关掉），
-    换新连接再发一次并标 conn_retry——这是基础设施问题，不是模型/接口问题，不该计入失败率。"""
+    """发一次请求；复用连接失败时最多重试一次，并记录每次尝试和端到端时间。"""
     api = ep["api"]
     rec = _new_rec(ep, body["model"], api)
+    rec["request_config"] = {k: body[k] for k in ("model", "stream", "temperature", "max_tokens", "max_output_tokens", "reasoning", "reasoning_effort", "stream_options") if k in body}
     acc = {"text": [], "reasoning": [], "items": [], "calls": {}}
     path = endpoint_parts(ep["base_url"])[3] + ("/chat/completions" if api == "chat" else "/responses")
     data = json.dumps(body).encode()
     headers = {"Authorization": "Bearer " + ep["api_key"], "Content-Type": "application/json", "Accept": "text/event-stream",
                "User-Agent": "modelbench/" + VERSION}
-    # 复用连接上的失败才算基础设施问题（可换连接重发）；新连接上的失败是真实的接口/网络问题，必须计入
     conn_errors = (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError,
                    http.client.ResponseNotReady, http.client.CannotSendRequest, http.client.BadStatusLine)
+    logical_start = t0 = time.perf_counter()
+    rec["attempts"] = []
+    attempt_recorded = False
     try:
         for attempt in (0, 1):
+            t0 = time.perf_counter()
+            attempt_recorded = False
             conn, reused, cs = pool.get(ep, timeout)
             if attempt == 0:
                 rec["first_reused"] = reused  # 重试前的连接状态：连接复用率看这个，reused 会因重试变成 False
@@ -329,7 +362,9 @@ def stream_request(pool, ep, body, timeout):
                 conn.request("POST", path, body=data, headers=headers)
                 resp = conn.getresponse()
                 break
-            except conn_errors:
+            except conn_errors as e:
+                rec["attempts"].append({"reused": reused, "elapsed_s": round(time.perf_counter() - t0, 3), "error": type(e).__name__})
+                attempt_recorded = True
                 pool.drop(ep)
                 if reused and attempt == 0:
                     rec["conn_retry"] = True
@@ -355,9 +390,9 @@ def stream_request(pool, ep, body, timeout):
                       for it in acc["items"] if isinstance(it, dict) and it.get("type") == "function_call"]
                      if api == "responses" else [acc["calls"][k] for k in sorted(acc["calls"])])
             rec["tool_calls"] = calls
-            rec["ok"] = rec["response_status"] in ("completed", "incomplete") and bool(rec["text"] or calls)
+            rec["ok"] = rec["response_status"] == "completed" and bool(rec["text"] or calls) and not rec["error"]
             if not rec["ok"] and not rec["error"]:
-                rec["error"] = "非流式响应里没有正文"
+                rec["error"] = "响应未完整完成" if rec["response_status"] != "completed" else "非流式响应里没有正文或工具调用"
         else:
             while True:
                 raw = resp.readline()
@@ -380,19 +415,26 @@ def stream_request(pool, ep, body, timeout):
                       for it in acc["items"] if isinstance(it, dict) and it.get("type") == "function_call"]
                      if api == "responses" else [acc["calls"][k] for k in sorted(acc["calls"])])
             rec["tool_calls"] = calls
-            rec["ok"] = rec["response_status"] == "completed" and bool(rec["text"] or calls)
+            rec["ok"] = rec["response_status"] == "completed" and bool(rec["text"] or calls) and not rec["error"]
             if not rec["response_status"] and not rec["error"]:
                 rec["error"] = "流在完成事件之前断开"
+            elif rec["response_status"] != "completed" and not rec["error"]:
+                rec["error"] = "响应未完整完成"
         if resp.will_close:
             pool.drop(ep)
     except Exception as e:  # noqa: BLE001
         rec["error"] = clip(f"{type(e).__name__}: {e}")
         pool.drop(ep)
     rec["total_s"] = round(time.perf_counter() - t0, 3)
-    # 排队时间：响应头到手之后、首个数据事件之前的等待（服务端/中转站内部排队，不是网络也不是模型）
+    rec["wall_total_s"] = round(time.perf_counter() - logical_start, 3)  # 包含重连和失败的前次尝试
+    if not attempt_recorded:
+        rec["attempts"].append({"reused": rec["reused"], "elapsed_s": rec["total_s"], "status": rec["status"], "error": rec["error"]})
+    # 客户端观测值，不能归因于服务端排队。
     if rec["headers_s"] is not None and rec["first_event_s"] is not None:
         rec["queue_s"] = round(max(rec["first_event_s"] - rec["headers_s"], 0), 3)
     usage = rec["usage"] or {}
+    if usage and "cached_tokens" not in usage:
+        usage["cached_tokens"] = (usage.get("input_tokens_details") or {}).get("cached_tokens")
     out = usage.get("output_tokens")
     rec["reasoning_tokens"] = usage.get("reasoning_tokens") or (usage.get("output_tokens_details") or {}).get("reasoning_tokens")
     start = rec["first_token_s"] if rec["first_token_s"] is not None else rec["first_event_s"]
@@ -428,17 +470,50 @@ def build_tasks(scenarios, prompt=DEFAULT_PROMPT, context=0):
             tasks.append({"id": "speed", "scenario": "speed", "kind": "plain", "name": "自定义提示词", "prompt": prompt, "system": context_text(context)})
         elif sc == "gen":
             tasks.append({"id": "gen", "scenario": "gen", "kind": "plain", "name": "生成约 300 字", "prompt": GEN_PROMPT})
-        elif sc == "quiz":
-            tasks += [{"id": q["id"], "scenario": "quiz", "kind": "plain", "name": q["name"], "prompt": q["prompt"], "chk": q["chk"],
-                       **({"strict": True} if q.get("strict") else {})} for q in QUIZ]
+        elif sc in ("quiz", "quiz_extended"):
+            tasks += [{"id": q["id"], "scenario": sc, "kind": "plain", "name": q["name"], "prompt": q["prompt"], "chk": q["chk"],
+                       **({"strict": True} if q.get("strict") else {})} for q in (QUIZ if sc == "quiz" else QUIZ_EXTENDED)]
         elif sc == "tool":
             tasks.append({"id": "tool", "scenario": "tool", "kind": "tool", "name": "两步工具调用", "prompt": TOOL_PROMPT})
         elif sc in ("needle10k", "needle30k"):
             tasks.append({"id": sc, "scenario": sc, "kind": "plain", "name": SCENARIOS[sc], "system": context_text(10000 if sc == "needle10k" else 30000, True),
                           "prompt": "上文背景材料里写了“本次测试的暗号”，它是什么？只输出暗号本身。", "chk": ("contains", "青竹-7392")})
+        elif sc == "needle_matrix":
+            for length in (10000, 30000):
+                for depth in (10, 50, 90):
+                    for present in (True, False):
+                        tid = f"nm{length}-{depth}-{'yes' if present else 'no'}"
+                        tasks.append({"id": tid, "scenario": sc, "kind": "needle_matrix", "name": f"约{length} tokens · 深度{depth}% · {'有答案' if present else '无答案'}",
+                                      "prompt": "根据文档，目标编号是多少？未出现目标编号则只输出未知。只输出编号或未知。",
+                                      "length": length, "depth": depth, "present": present})
         elif sc == "fingerprint":
             tasks += [{"id": f"fp{i + 1}", "scenario": "fingerprint", "kind": "plain", "name": f"数值指纹 {i + 1}", "prompt": p} for i, p in enumerate(FP_PROMPTS)]
     return tasks
+
+
+def materialize_task(task, seed, round_no):
+    """按任务和轮次派生实例；相同轮次的各模型收到完全相同的实例。"""
+    digest = hashlib.sha256(f"{seed}:{round_no}:{task['id']}".encode()).digest()
+    rng = random.Random(int.from_bytes(digest[:8], "big"))
+    result = dict(task)
+    if task["kind"] == "tool":
+        result["tool_result"] = dict(TOOL_RESULT, price=rng.randrange(1000, 99999) / 100)
+    elif task["kind"] == "needle_matrix":
+        n = max(1, round(task["length"] / 44))
+        parts = [f"第{i + 1}条：{_FILLER_UNIT}" for i in range(n)]
+        target = f"MB-{rng.randrange(100000, 999999)}"
+        if task["present"]:
+            parts.insert(round(n * task["depth"] / 100), f"【目标记录】目标编号：{target}。")
+        distractor = f"MB-{rng.randrange(100000, 999999)}"
+        while distractor == target:
+            distractor = f"MB-{rng.randrange(100000, 999999)}"
+        parts.insert(round(n * (100 - task["depth"]) / 100), f"【干扰记录】其他编号：{distractor}。")
+        # 文档作为用户内容，而非 system/developer 指令。
+        result["prompt"] = "文档：\n" + "".join(parts) + "\n问题：" + task["prompt"]
+        result["chk"] = ("re", re.escape(target if task["present"] else "未知"))
+        result["strict"] = True
+        result["case"] = {"target": target if task["present"] else None, "distractor": distractor, "length_estimate": task["length"], "depth_percent": task["depth"], "present": task["present"]}
+    return result
 
 
 def _norm(t):
@@ -465,21 +540,41 @@ def normalize_answer(text):
 def check_answer(chk, text, strict=False):
     """判分。strict=True 时不做宽松化（用于“指令遵循/严格输出”类题目）。"""
     kind, arg = chk
-    t = (text or "").strip()
+    t = (text or "") if strict else (text or "").strip()
     if not strict:
         t = normalize_answer(t)[0]
     if kind == "re":
         return re.fullmatch(arg, t) is not None
     if kind == "json":
         try:
-            return json.loads(t) == arg
-        except ValueError:
+            def unique_object(pairs):
+                obj = {}
+                for key, value in pairs:
+                    if key in obj:
+                        raise ValueError("duplicate key")
+                    obj[key] = value
+                return obj
+            def equal(actual, expected):
+                if isinstance(expected, dict):
+                    return isinstance(actual, dict) and actual.keys() == expected.keys() and all(equal(actual[k], v) for k, v in expected.items())
+                if isinstance(expected, list):
+                    return isinstance(actual, list) and len(actual) == len(expected) and all(equal(a, b) for a, b in zip(actual, expected))
+                if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+                    return isinstance(actual, (int, float)) and not isinstance(actual, bool) and actual == expected
+                return type(actual) is type(expected) and actual == expected
+            return equal(json.loads(t, object_pairs_hook=unique_object), arg)
+        except (ValueError, TypeError):
             return False
+    if kind == "set":
+        vals = t.split(",")
+        return len(vals) == len(arg) and len(set(vals)) == len(arg) and set(vals) == set(arg)
     return arg in t
 
 
 def _grade(rec, task):
     rec["scenario"], rec["task"], rec["task_name"] = task["scenario"], task["id"], task["name"]
+    if task.get("case"):
+        rec["case"] = task["case"]
     if "chk" in task:
         strict = bool(task.get("strict"))
         rec["strict"] = strict
@@ -497,50 +592,63 @@ def _tool_args_ok(call):
         args = json.loads(call.get("arguments") or "")
     except ValueError:
         return False
-    return call.get("name") == TOOL_DEF["name"] and isinstance(args, dict) and "MET" in str(args.get("item", ""))
+    return call.get("name") == TOOL_DEF["name"] and isinstance(args, dict) and args.get("item") == TOOL_RESULT["item"]
 
 
 def run_tool(pool, ep, model, task, timeout, effort=""):
-    """两步工具调用：①模型必须调用 lookup_price 且参数是合法 JSON；②把工具结果（和第一步输出的推理项）回传后，模型要给出 128.5。"""
+    """验证工具调用以及对本次工具返回结果的使用。"""
+    logical_start = time.perf_counter()
     api = ep["api"]
     tool = ({"type": "function", "function": TOOL_DEF} if api == "chat" else dict(TOOL_DEF, type="function"))
     user = {"role": "user", "content": task["prompt"]}
-    body1 = with_effort({"model": model, "messages": [user], "tools": [tool], "stream": True, "stream_options": {"include_usage": True}} if api == "chat"
-                        else {"model": model, "input": [user], "tools": [tool], "stream": True}, api, effort)
+    body1 = make_body(api, model, task["prompt"], effort=effort)
+    if api == "responses":
+        body1["input"] = [user]
+    body1["tools"] = [tool]
     r1 = stream_request(pool, ep, body1, timeout)
     _grade(r1, task)
-    r1["steps"] = [{"step": 1, "ok": r1["ok"], "status": r1["status"], "total_s": r1["total_s"], "error": r1["error"]}]
+    r1["tool_result"] = task.get("tool_result", TOOL_RESULT)
+    r1["steps"] = [{"step": 1, "ok": r1["ok"], "status": r1["status"], "total_s": r1["total_s"], "error": r1["error"], "request_config": r1["request_config"]}]
     call = next((c for c in r1["tool_calls"] if c.get("name")), None)
     if not r1["ok"] or not call or not _tool_args_ok(call):
+        r1["wall_total_s"] = round(time.perf_counter() - logical_start, 3)
         r1["pass"] = False
         r1["grade_note"] = ("第一步请求失败：" + (r1["error"] or "") if not r1["ok"] else
                             "第一步没有调用工具" if not call else "第一步工具参数不合法：" + clip(str(call.get("arguments")), 80))
         return r1
-    result = json.dumps(TOOL_RESULT, ensure_ascii=False)
+    expected = task.get("tool_result", TOOL_RESULT)
+    result = json.dumps(expected, ensure_ascii=False)
     rp = r1["_replay"]
     if api == "chat":
         asst = {"role": "assistant", "content": rp["text"] or None,
                 "tool_calls": [{"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": call["arguments"]}}]}
         if rp["reasoning"]:
             asst["reasoning_content"] = rp["reasoning"]
-        body2 = with_effort({"model": model, "messages": [user, asst, {"role": "tool", "tool_call_id": call["id"], "content": result}],
-                             "tools": [tool], "stream": True, "stream_options": {"include_usage": True}}, api, effort)
+        body2 = make_body(api, model, task["prompt"], effort=effort)
+        body2.update(messages=[user, asst, {"role": "tool", "tool_call_id": call["id"], "content": result}], tools=[tool])
     else:
-        body2 = with_effort({"model": model, "tools": [tool], "stream": True,
-                             "input": [user] + rp["items"] + [{"type": "function_call_output", "call_id": call["id"], "output": result}]}, api, effort)
+        body2 = make_body(api, model, task["prompt"], effort=effort)
+        body2.update(tools=[tool], input=[user] + rp["items"] + [{"type": "function_call_output", "call_id": call["id"], "output": result}])
     r2 = stream_request(pool, ep, body2, timeout)
     rec = dict(r2)
     rec["time"] = r1["time"]
     rec["total_s"] = round(r1["total_s"] + r2["total_s"], 3)
+    rec["wall_total_s"] = round(time.perf_counter() - logical_start, 3)
     rec["gen_s"] = r2["total_s"]  # 第二步（拿到工具结果后生成答案）单独一份：和单次请求的总耗时可比；两步合计用于看端到端代价
+    rec["headers_s"], rec["queue_s"] = r1["headers_s"], r1["queue_s"]
     rec["first_event_s"] = r1["first_event_s"]
+    rec["first_token_s"] = r1["first_token_s"] if r1["first_token_s"] is not None else (round(r1["total_s"] + r2["first_token_s"], 3) if r2["first_token_s"] is not None else None)
+    rec["first_think_s"] = r1["first_think_s"] if r1["first_think_s"] is not None else (round(r1["total_s"] + r2["first_think_s"], 3) if r2["first_think_s"] is not None else None)
+    rec["buffered"] = r1["buffered"] or r2["buffered"]
+    rec["non_stream"] = r1["non_stream"] or r2["non_stream"]
     rec["events"] = [dict(e, step=1) for e in r1["events"]] + [dict(e, step=2) for e in r2["events"]]
-    rec["steps"] = r1["steps"] + [{"step": 2, "ok": r2["ok"], "status": r2["status"], "total_s": r2["total_s"], "error": r2["error"]}]
+    rec["steps"] = [dict(r1["steps"][0], attempts=r1["attempts"], wall_total_s=r1["wall_total_s"]), {"step": 2, "ok": r2["ok"], "status": r2["status"], "total_s": r2["total_s"], "wall_total_s": r2["wall_total_s"], "attempts": r2["attempts"], "error": r2["error"], "request_config": r2["request_config"]}]
     rec["ok"] = r1["ok"] and r2["ok"]
     rec["error"] = ("第二步：" + r2["error"]) if r2["error"] else ""
     _grade(rec, task)
-    rec["pass"] = bool(rec["ok"] and "128.5" in rec["text"])
-    rec["grade_note"] = "" if rec["pass"] else ("第二步请求失败：" + (r2["error"] or f"HTTP {r2['status']}") if not r2["ok"] else "回答里没有 128.5：" + clip(rec["text"], 60))
+    rec["tool_result"] = expected
+    rec["pass"] = bool(rec["ok"] and check_answer(("json", {"price": expected["price"], "unit": expected["unit"]}), rec["text"], True))
+    rec["grade_note"] = "" if rec["pass"] else ("第二步请求失败：" + (r2["error"] or f"HTTP {r2['status']}") if not r2["ok"] else "未找到要求的价格和单位：" + clip(rec["text"], 60))
     return rec
 
 
@@ -597,9 +705,9 @@ def fp_verdict(dist, noise):
     样本再多也不低于 FP_ABS_FLOOR；介于 1× 和 2× 判定线之间的差异不作判断（可拒判，不硬给结论）。"""
     thr = round(max(FP_NOISE_FACTOR * (noise or 0), FP_ABS_FLOOR), 4)
     if dist <= thr:
-        return "指纹一致", thr
+        return "数值分布接近（不证明身份）", thr
     if dist >= 2 * thr:
-        return "指纹不一致", thr
+        return "数值分布差异较大（不证明身份）", thr
     return "差异不明显（不作判断）", thr
 
 
@@ -636,17 +744,35 @@ def fp_analysis(records):
 # ---------------------------------------------------------------- 混合多次测试（提高样本量）
 
 def cond_of(env, scenario):
-    """条件指纹：两次测试只有这个指纹完全相同才能合并样本，否则差值的来源不只是随机波动。
-    包含：推理强度 + 提示词/背景指纹 + 采样参数（v2.4 起显式固定；旧结果记“未记录”）。
-    采样参数没记录与已固定不能互合——一个用接口默认 temperature，一个是 0，
-    否则会把“采样差异”当成模型差异。"""
+    """返回可验证的场景条件键；历史数据缺字段时返回 None，不假定未知条件相同。"""
     env = env or {}
-    eff = env.get("effort") or ""
-    fp = (env.get("prompt_fingerprints") or {}).get(scenario, "")
-    sm = env.get("sampling")
-    smk = f"t{sm.get('temperature')}/m{sm.get('max_tokens')}" if sm else "未记录采样"
-    ctx = env.get("context_tokens") or 0
-    return f"{eff}|{fp}|{smk}|ctx{ctx}"
+    fp = (env.get("scenario_fingerprints") or {}).get(scenario)
+    required = ("method_version", "sampling", "timeout_s", "gap_s", "warmup", "effort")
+    sampling = env.get("sampling")
+    if not fp or any(k not in env or env[k] is None for k in required) or not isinstance(sampling, dict) or any(k not in sampling for k in ("temperature", "max_tokens")):
+        return None
+    data = {k: env[k] for k in required}
+    if env.get("method_version") == "4":
+        if "concurrency" not in env or "connection_mode" not in env:
+            return None
+        data["concurrency"] = env["concurrency"]
+        data["connection_mode"] = env["connection_mode"]
+        if scenario in ("tool", "needle_matrix"):
+            if env.get("seed") is None:
+                return None
+            data["seed"] = env["seed"]
+    data.update(scenario=scenario, fingerprint=fp)
+    return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def service_of(env, label):
+    """合并同名目标时必须核对原始接口地址与协议；不保存或哈希密钥。"""
+    endpoint = (label or "").split("/", 1)[0]
+    matches = [e for e in (env.get("endpoints") or []) if e.get("name") == endpoint and e.get("base_url") and e.get("api")]
+    if len(matches) != 1:
+        return None
+    e = matches[0]
+    return hashlib.sha256(json.dumps([e["base_url"], e["api"]], ensure_ascii=False).encode()).hexdigest()
 
 
 def cond_label(env, scenario):
@@ -664,7 +790,7 @@ def cond_label(env, scenario):
 
 
 def merge_analysis(runs):
-    """多次测试合并：把同一（模型, 场景, 条件）的请求合在一起重算统计，样本量上去后结论更可靠。
+    """多次测试合并：把条件与接口身份已知且相同的请求合在一起做描述性统计。
     条件不同的组不合并、单独成组并注明——绝不把不同条件的结果混在一起算。"""
     groups, sources, group_env = {}, {}, {}
     for run in runs or []:
@@ -673,27 +799,31 @@ def merge_analysis(runs):
         for rec in run.get("records") or []:
             sc = rec.get("scenario", "speed")
             label = rec.get("label") or rec.get("model")
-            ck = cond_of(env, sc) + "|" + sc
-            key = (label, sc, ck)
-            groups.setdefault(key, []).append(dict(rec, cond=ck))  # 打上条件标记，summarize 按它分组，不同条件不会混算
+            ck = cond_of(env, sc)
+            service = service_of(env, label)
+            # 未知条件不能和任何其他运行合并或作跨运行推断。
+            ck = ck or "unknown:" + str(rid) + ":" + sc
+            service = service or "unknown:" + str(rid)
+            key = (label, sc, ck, service)
+            groups.setdefault(key, []).append(dict(rec, cond=ck, service=service))
             group_env.setdefault(key, env)  # 记住这一组自己的环境（不同条件组的 env 不同，标签才不会都一样）
             sources.setdefault(key, {})[rid] = sources.setdefault(key, {}).get(rid, 0) + 1
     if not groups:
         return None
     merged = []
     for key, recs in groups.items():
-        label, sc, cond = key
+        label, sc, cond, service = key
         env = group_env.get(key) or {}
-        merged.append({"label": label, "scenario": sc, "cond": cond, "cond_label": cond_label(env, sc),
+        merged.append({"label": label, "scenario": sc, "cond": cond, "service": service, "cond_label": cond_label(env, sc),
                        "runs": sorted(k for k in sources[key] if k), "n_per_run": [sources[key][k] for k in sorted(k for k in sources[key] if k)],
                        "records": recs})
     # 合并后的记录重新汇总（复用同一套统计，保证与单次测试口径一致）
     all_recs = [r for g in merged for r in g["records"]]
     rows = summarize(all_recs)
     # 把每个汇总行指回它的来源测试，便于展示“这行是几次测试合并来的”
-    by_key = {(g["label"], g["scenario"], g["cond"]): g for g in merged}
+    by_key = {(g["label"], g["scenario"], g["cond"], g["service"]): g for g in merged}
     for row in rows:
-        g = by_key.get((row["label"], row["scenario"], row.get("cond", "")))
+        g = by_key.get((row["label"], row["scenario"], row.get("cond", ""), row.get("service", "")))
         if g:
             row["merged_runs"], row["merged_n_per_run"], row["merged_cond"] = g["runs"], g["n_per_run"], g["cond_label"]
     # 条件不一致的提示：同一（模型, 场景）出现多个条件时，说明它们没被合并
@@ -701,7 +831,11 @@ def merge_analysis(runs):
     for g in merged:
         split.setdefault((g["label"], g["scenario"]), set()).add(g["cond"])
     warnings = [f"{lb} 在「{sc}」里有 {len(cs)} 种不同条件，已分开统计、未合并"
-                for (lb, sc), cs in split.items() if len(cs) > 1]
+                 for (lb, sc), cs in split.items() if len(cs) > 1]
+    services = {}
+    for g in merged:
+        services.setdefault((g["label"], g["scenario"]), set()).add(g["service"])
+    warnings += [f"{lb} 在「{sc}」的接口地址或协议不同或未知，已分开统计" for (lb, sc), ss in services.items() if len(ss) > 1]
     return {"rows": rows, "groups": [{k: v for k, v in g.items() if k != "records"} for g in merged],
             "conclusion": conclusion(rows), "warnings": warnings, "run_ids": [r.get("id") for r in runs or [] if r.get("id")]}
 
@@ -768,24 +902,26 @@ def summarize(records):
     """按（模型, 场景）汇总。合并多次测试时记录会带 cond 字段，此时按（模型, 场景, 条件）分组，
     保证条件不同的结果不会混在一起统计（条件相同才谈得上合并）。"""
     rows = []
-    keys = list(dict.fromkeys((r.get("label") or r["model"], r.get("scenario", "speed"), r.get("cond", "")) for r in records))
-    for label, sc, cond in keys:
+    keys = list(dict.fromkeys((r.get("label") or r["model"], r.get("scenario", "speed"), r.get("cond", ""), r.get("service", "")) for r in records))
+    for label, sc, cond, service in keys:
         rs = [r for r in records if (r.get("label") or r["model"]) == label and r.get("scenario", "speed") == sc
-              and r.get("cond", "") == cond]
+              and r.get("cond", "") == cond and r.get("service", "") == service]
         good = [r for r in rs if r["ok"]]
+        streaming = [r for r in good if not r.get("buffered") and not r.get("non_stream")]
         codes = {}
         for r in rs:
             if not r["ok"]:
                 k = str(r["status"] or "无响应")
                 codes[k] = codes.get(k, 0) + 1
         graded = [r for r in rs if r.get("pass") is not None]
-        row = {"label": label, "scenario": sc, "cond": cond, "n": len(rs), "ok": len(good), "ok_ci": wilson(len(good), len(rs)), "codes": codes,
-               "total": dist([r["total_s"] for r in good]), "first_token": dist([r["first_token_s"] for r in good]),
+        apis = sorted({r.get("api") for r in rs if r.get("api")})
+        row = {"label": label, "scenario": sc, "cond": cond, "service": service, "api": apis[0] if len(apis) == 1 else "", "n": len(rs), "ok": len(good), "ok_ci": wilson(len(good), len(rs)), "codes": codes,
+               "total": dist([r["total_s"] for r in good]), "first_token": dist([r["first_token_s"] for r in streaming]),
                "first_event": dist([r["first_event_s"] for r in good]), "first_think": dist([r.get("first_think_s") for r in good]),
-               "tps": dist([r.get("tps") for r in good]), "connect": dist([r["connect_s"] for r in rs if r.get("first_reused") is False]),
+               "tps": dist([r.get("tps") for r in streaming]), "connect": dist([r["connect_s"] for r in rs if r.get("first_reused") is False]),
                "tps_overall": dist([r.get("tps_overall") for r in good]), "total_vals": [round(r["total_s"], 3) for r in good if r["total_s"] is not None],
-               "first_token_vals": [round(r["first_token_s"], 3) for r in good if r["first_token_s"] is not None],
-               "tps_vals": [r["tps"] for r in good if r.get("tps") is not None],
+               "first_token_vals": [round(r["first_token_s"], 3) for r in streaming if r["first_token_s"] is not None],
+               "tps_vals": [r["tps"] for r in streaming if r.get("tps") is not None],
                "gen": dist([r.get("gen_s") for r in good]), "gen_vals": [round(r["gen_s"], 3) for r in good if r.get("gen_s") is not None],
                "queue": dist([r.get("queue_s") for r in good]),
                "queue_vals": [round(r["queue_s"], 3) for r in good if r.get("queue_s") is not None],
@@ -795,21 +931,34 @@ def summarize(records):
                "low_ok_sample": 0 < len(good) < LOW_SAMPLE <= len(rs),  # 请求够多，但成功的太少：耗时只统计成功请求，实际用来算耗时的样本不足
                "pass_n": None, "pass_rate": None, "pass_ci": None,
                "consistency": None, "by_task": {}, "tin": None, "tout": None, "cached": None, "queue_median": None, "cache_trend": None, "sec_per_1k": None, "sec_per_1k_vals": []}
+        wall_known = [r for r in rs if isinstance(r.get("wall_total_s"), (int, float))]
+        row["wall_total"] = dist([r["wall_total_s"] for r in good if r.get("wall_total_s") is not None])
+        row["slo_seconds"] = SLO_SECONDS
+        row["slo_n"] = sum(bool(r["ok"] and r.get("pass") is not False and r["wall_total_s"] <= SLO_SECONDS) for r in wall_known)
+        row["slo_observed"] = len(wall_known)
+        row["slo_rate"] = round(row["slo_n"] / len(rs), 3) if len(wall_known) == len(rs) else None
+        row["chars_per_second"] = dist([len(r.get("text") or "") / r["wall_total_s"] for r in good if r.get("text") and (r.get("wall_total_s") or 0) > 0])
+        row["retry_n"] = sum(bool(r.get("conn_retry") or any(len(s.get("attempts", [])) > 1 for s in r.get("steps", []))) for r in rs)
+        row["returned_models"] = sorted({r["returned_model"] for r in rs if isinstance(r.get("returned_model"), str)})
+        row["system_fingerprints"] = sorted({r["system_fingerprint"] for r in rs if isinstance(r.get("system_fingerprint"), str)})
         shares = [max(r["first_token_s"] - r["first_event_s"], 0) / r["total_s"] for r in good
                   if r["first_token_s"] is not None and r["first_event_s"] is not None and r["total_s"]]
         row["think_share"] = round(statistics.median(shares), 3) if shares else None
         rshare = [r["reasoning_tokens"] / r["usage"]["output_tokens"] for r in good
                   if r.get("reasoning_tokens") is not None and (r.get("usage") or {}).get("output_tokens")]
         row["reasoning_share"] = round(statistics.median(rshare), 3) if rshare else None
-        u = (good[0]["usage"] or {}) if good else {}
-        row["tin"], row["tout"] = u.get("input_tokens"), u.get("output_tokens")
+        for field, output in (("input_tokens", "tin"), ("output_tokens", "tout")):
+            values = [(r.get("usage") or {}).get(field) for r in good]
+            values = [v for v in values if isinstance(v, (int, float))]
+            row[output] = round(statistics.median(values), 1) if values else None
         cached_all = [(r.get("usage") or {}).get("cached_tokens") for r in good]
         cached_all = [c for c in cached_all if c is not None]
         row["cached"] = round(statistics.median(cached_all)) if cached_all else None  # 取中位：前缀缓存命中随轮次递增，第一次的值不代表整体
+        row["cached_known"], row["cached_hit_n"] = len(cached_all), sum(v > 0 for v in cached_all)
         # 前缀缓存趋势：首轮几乎不命中、后续命中越来越多时，后几轮的耗时偏快，中位数会被拉低。
         # 用“首轮 vs 末轮”的耗时比和 cached 增量暴露它，避免把缓存优势当成模型性能。
         row["cache_trend"] = None
-        if len(good) >= 4:
+        if len(good) >= 4 and len({r.get("task") for r in good}) == 1:
             def _c(r):
                 return (r.get("usage") or {}).get("cached_tokens")
             withc = [r for r in good if _c(r) is not None]
@@ -822,8 +971,7 @@ def summarize(records):
                                            "total_first": round(t0, 3), "total_last": round(t1, 3),
                                            "speedup": round(t0 / t1, 2) if t1 > 0.05 else None}
         row["queue_median"] = row["queue"]["median"] if row["queue"] else None
-        # 每千输出 tokens 的耗时：输出长度不同的模型之间，这个比“总耗时”更公
-        # （总耗时 = 首字等待 + 生成时间，输出越长越吃亏；每千 tokens 把长度归一化掉）
+        # 每千输出 tokens 的耗时：仅为描述性指标，固定等待和 tokenizer 差异未消除。
         per1k = [r["total_s"] / (u / 1000.0) for r in good
                  for u in [(r.get("usage") or {}).get("output_tokens") or 0] if u >= 20 and r.get("total_s")]
         row["sec_per_1k"] = dist([round(v, 2) for v in per1k])
@@ -835,12 +983,8 @@ def summarize(records):
                 t = row["by_task"].setdefault(r["task"], {"name": r.get("task_name", r["task"]), "pass": 0, "n": 0})
                 t["n"] += 1
                 t["pass"] += 1 if r["pass"] else 0
-            if len(row["by_task"]) > 1:
-                # 同一道题重复多轮不是独立样本：区间按“题”计（每题取各轮答对比例），避免 10 题测 10 轮被当成 100 个独立样本、区间虚窄
-                units = len(row["by_task"])
-                row.update(pass_ci=wilson(sum(t["pass"] / t["n"] for t in row["by_task"].values()), units), pass_ci_basis="题目", pass_units=units)
-            else:
-                row.update(pass_ci=wilson(p, len(graded)), pass_ci_basis="请求", pass_units=len(graded))
+            # 固定题目重复测量不满足普通二项 Wilson 区间假设；先只显示描述性得分。
+            row.update(pass_ci=None, pass_ci_basis=None, pass_units=len(row["by_task"]))
             if sc == "quiz":
                 cons = []
                 for tid in {r["task"] for r in graded}:
@@ -858,41 +1002,40 @@ def fmt(v, unit="s"):
 
 def conclusion(rows, fp=None):
     parts = []
-    for sc in dict.fromkeys(r["scenario"] for r in rows):
-        rs = [r for r in rows if r["scenario"] == sc]
+    for sc, cond, api in dict.fromkeys((r["scenario"], r.get("cond", ""), r.get("api", "")) for r in rows):
+        rs = [r for r in rows if r["scenario"] == sc and r.get("cond", "") == cond and r.get("api", "") == api]
         seg = []
+        if cond.startswith("unknown:"):
+            parts.append(f"【{SCENARIOS.get(sc, sc)}】测试条件未知，仅显示统计数据，不作排名")
+            continue
+        # 同名目标若对应多个服务身份，只展示分组信息，不能当成两个模型排名。
+        duplicate_labels = len({r["label"] for r in rs}) != len(rs)
+        if duplicate_labels:
+            parts.append(f"【{SCENARIOS.get(sc, sc)}】同名目标的接口身份不同或未知，未作排名")
+            continue
         full = sorted((r for r in rs if r["total"] and r["ok"] / r["n"] >= 0.8), key=lambda r: r["total"]["median"]) if sc != "fingerprint" else []  # 成功率 ≥80% 才参与比速度；耗时只统计成功请求；指纹场景不比速度
         if full:
             f = full[0]
-            txt = f"最快 {f['label']}（总耗时中位数 {fmt(f['total']['median'])}" + (f"，成功率 {f['ok']}/{f['n']}，只统计成功请求" if f["ok"] < f["n"] else "") + "）"
+            prefix = "成功请求耗时中位数最低" if len(full) > 1 else "成功请求耗时中位数"
+            txt = f"{prefix} {f['label']}（{fmt(f['total']['median'])}" + (f"，成功率 {f['ok']}/{f['n']}，只统计成功请求" if f["ok"] < f["n"] else "") + "）"
             # 输出长度差异大时，“总耗时”不可比：输出短的天然占优。给出可归一化参照（tokens/秒），并明确提示
             outs = [r["tout"] for r in full if r.get("tout")]
             if len(outs) >= 2 and max(outs) > 2 * max(1, min(outs)):
+                txt += (f"。注意：各模型输出长度差 {max(outs) / max(1, min(outs)):.0f} 倍（{min(outs)}–{max(outs)} tokens），"
+                        "总耗时受输出长度影响，不能直接当性能")
                 fast_tps = [r for r in full if r.get("tps")]
                 if fast_tps:
                     best = max(fast_tps, key=lambda r: r["tps"]["median"])
-                    txt += (f"。注意：各模型输出长度差 {max(outs) / max(1, min(outs)):.0f} 倍（{min(outs)}–{max(outs)} tokens），"
-                            f"总耗时受输出长度影响，不能直接当性能；按输出速度看最高的是 {best['label']}（{best['tps']['median']} tokens/s）")
+                    txt += f"；按输出速度看最高的是 {best['label']}（{best['tps']['median']} tokens/s，跨模型 token 口径可能不同）"
             if len(full) > 1:
-                s2 = full[1]
-                p = mwu_p(f["total_vals"], s2["total_vals"])
-                n_small = min(len(f["total_vals"]), len(s2["total_vals"]))
-                if p is not None and n_small >= 4:
-                    txt += f"，显著快于第二名 {s2['label']}（p={p}）" if p < 0.05 else f"，但与 {s2['label']} 差异不明显（p={p}）"
-                    # 检验力提示：小样本下“差异不明显”常常是样本不够，不是真的没差别
-                    if p >= 0.05:
-                        rel = abs(f["total"]["median"] - s2["total"]["median"]) / max(s2["total"]["median"], 1e-9)
-                        if n_small < 8 or rel < 0.35:
-                            txt += f"；注意每边仅 {n_small} 个样本，检验力低，真实差距在 30% 以内时很难检出——多测几轮再到“历史与趋势”勾选多次结果合并对比"
-                elif f["total"]["max"] >= s2["total"]["min"]:
-                    txt += f"，与 {s2['label']} 范围重叠，差异不明显（样本少）"
+                txt += f"；第二名 {full[1]['label']}（{fmt(full[1]['total']['median'])}）；仅描述本次样本，不能推断显著性或等效"
             seg.append(txt)
         graded = sorted((r for r in rs if r["pass_rate"] is not None), key=lambda r: -r["pass_rate"])
         if graded:
             b = graded[0]
-            txt = f"正确率最高 {b['label']}（{b['pass_n']}/{b['graded']}）"
-            if len(graded) > 1 and b["pass_ci"] and graded[1]["pass_ci"] and b["pass_ci"][0] <= graded[1]["pass_ci"][1]:
-                txt += f"，与 {graded[1]['label']} 的区间重叠，差异不明显"
+            prefix = "正确率最高" if len(graded) > 1 else "正确率"
+            txt = f"{prefix} {b['label']}（{b['pass_n']}/{b['graded']}）"
+            txt += "，仅描述固定题集和本次请求"
             seg.append(txt)
         for r in rs:
             if r["ok"] < r["n"]:
@@ -910,8 +1053,8 @@ def conclusion(rows, fp=None):
         ct = r.get("cache_trend")
         if ct and (ct.get("speedup") or 0) >= 1.3:
             parts.append(f"⚠ {r['label']}（{SCENARIOS.get(r['scenario'], r['scenario'])}）疑似前缀缓存污染："
-                         f"首轮 {fmt(ct['total_first'])} → 末轮 {fmt(ct['total_last'])}（快 {ct['speedup']}×，缓存命中 {ct['cached_first']}→{ct['cached_last']} tokens）。"
-                         f"后几轮偏快，中位数被拉低；要公平比较请让各模型的缓存条件一致，或看首轮耗时")
+                         f"首条成功请求 {fmt(ct['total_first'])} → 末条 {fmt(ct['total_last'])}（快 {ct['speedup']}×，缓存命中 {ct['cached_first']}→{ct['cached_last']} tokens）。"
+                         "这只是相关现象，不能确认缓存造成了变化；请核对缓存条件")
     if fp:
         for p in fp.get("pairs", []):
             if p.get("dist") is None:
@@ -961,6 +1104,65 @@ def run_plan(plan, emit, stop):
     records = []
     total = plan["rounds"] * len(targets) * len(tasks)
     emit({"phase": "run", "total": total, "done": 0})
+    concurrency = plan.get("concurrency", 1)
+    if concurrency > 1:
+        local, pools, lock = threading.local(), [], threading.Lock()
+        next_start = {name: end + gap for name, end in last_end.items()}
+
+        def worker(item):
+            rd, seq, ep, model, task = item
+            if stop.is_set():
+                return None
+            with lock:
+                start = max(time.perf_counter(), next_start.get(ep["name"], 0))
+                next_start[ep["name"]] = start + gap
+            if stop.wait(max(0, start - time.perf_counter())):
+                return None
+            if not hasattr(local, "pool"):
+                local.pool = Pool()
+                with lock:
+                    pools.append(local.pool)
+            if plan.get("connection_mode", "reuse") == "cold":
+                local.pool.drop(ep)
+            instance = materialize_task(task, plan["seed"], rd)
+            rec = run_task(local.pool, ep, model, instance, timeout, plan.get("effort", ""))
+            rec["round"], rec["seq"] = rd, seq
+            return rec
+
+        seq = 0
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+                for rd in range(1, plan["rounds"] + 1):
+                    items = [(ep, m, t) for ep, m in targets for t in tasks]
+                    rng.shuffle(items)
+                    pending = set()
+                    for ep, m, task in items:
+                        if stop.is_set():
+                            break
+                        while len(pending) >= concurrency:
+                            done, pending = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+                            for f in done:
+                                rec = f.result()
+                                if rec:
+                                    records.append(rec)
+                                    emit({"records": records, "done": len(records)})
+                        if stop.is_set():
+                            break
+                        seq += 1
+                        pending.add(executor.submit(worker, (rd, seq, ep, m, task)))
+                    for f in concurrent.futures.as_completed(pending):
+                        rec = f.result()
+                        if rec:
+                            records.append(rec)
+                            emit({"records": records, "done": len(records)})
+                    if stop.is_set():
+                        break
+        finally:
+            for p in pools:
+                p.close()
+            pool.close()
+        records.sort(key=lambda r: r["seq"])
+        return records, extra
     for rd in range(plan["rounds"]):
         items = [(ep, m, t) for ep, m in targets for t in tasks]
         rng.shuffle(items)
@@ -971,7 +1173,10 @@ def run_plan(plan, emit, stop):
             pace(ep)
             if stop.is_set():
                 break
-            rec = run_task(pool, ep, m, t, timeout, plan.get("effort", ""))
+            instance = materialize_task(t, plan["seed"], rd + 1)
+            if plan.get("connection_mode", "reuse") == "cold":
+                pool.drop(ep)
+            rec = run_task(pool, ep, m, instance, timeout, plan.get("effort", ""))
             last_end[ep["name"]] = time.perf_counter()
             rec["round"], rec["seq"] = rd + 1, len(records) + 1
             records.append(rec)
@@ -984,21 +1189,29 @@ def make_env(plan, extra, meta):
     eps = {eid: {"name": e["name"], "base_url": e["base_url"], "api": e["api"]} for eid, e in plan["endpoints"].items()}
     scen = list(dict.fromkeys(t["scenario"] for t in plan["tasks"]))
     prompts = {t["id"]: hashlib.sha256((t["prompt"] + (t.get("system") or "")).encode()).hexdigest()[:12] for t in plan["tasks"]}
-    return {"schema_version": SCHEMA_VERSION, "tool_version": VERSION, "created": meta["created"], "host": platform.node(),
+    scenario_fingerprints = {}
+    for sc in scen:
+        manifest = {"method_version": METHOD_VERSION, "tasks": [t for t in plan["tasks"] if t["scenario"] == sc]}
+        if sc == "tool":
+            manifest.update(tool=TOOL_DEF, result=TOOL_RESULT)
+        scenario_fingerprints[sc] = hashlib.sha256(json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    env = {"schema_version": SCHEMA_VERSION, "tool_version": VERSION, "created": meta["created"], "host": platform.node(),
             "python": sys.version.split()[0], "seed": plan["seed"], "rounds": plan["rounds"], "timeout_s": plan["timeout"],
-            "gap_s": plan["gap"], "warmup": plan.get("warmup", False), "effort": plan.get("effort", ""), "scenarios": scen, "name": meta.get("name", ""), "prompt": meta.get("prompt", ""),
-            "context_tokens": meta.get("context", 0), "prompt_fingerprints": prompts, "proxy": False,
+            "gap_s": plan["gap"], "warmup": plan.get("warmup", False), "effort": plan.get("effort", ""), "concurrency": plan.get("concurrency", 1), "connection_mode": plan.get("connection_mode", "reuse"), "scenarios": scen, "name": meta.get("name", ""), "prompt": meta.get("prompt", ""),
+            "context_tokens": meta.get("context", 0), "prompt_fingerprints": prompts, "scenario_fingerprints": scenario_fingerprints, "method_version": METHOD_VERSION, "proxy": False,
             "sampling": {"temperature": SAMPLING["temperature"], "max_tokens": MAX_TOKENS},
             "endpoints": list(eps.values()), "models": [label_of(plan["endpoints"][e], m) for e, m in plan["models"]],
             "handshake_s": extra.get("handshake_s", {}), "warmup_results": extra.get("warmup", {}),
-            "note": "耗时不含连接建立（握手单列）；每轮随机交替；成功率/正确率区间为 Wilson 95%；采样参数已固定（temperature=0、输出上限 " + str(MAX_TOKENS) + " tokens），不同接口之间可比"}
+            "note": "请求耗时不含连接建立；另记录含重连的端到端耗时。采样参数已固定（temperature=0、输出上限 " + str(MAX_TOKENS) + " tokens），不保证上游执行一致；重复请求可能相关，成功率区间仅供参考，正确率不计算 Wilson 区间。"}
+    env["condition_keys"] = {sc: cond_of(env, sc) for sc in scen}
+    return env
 
 
 def write_report(path, result):
     env, rows, recs = result["env"], result["summary"], result["records"]
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"# 模型测试报告 {result['id']}\n\n- 时间：{env['created']}\n- 场景：{'、'.join(SCENARIOS.get(s, s) for s in env['scenarios'])}\n"
-                f"- 推理强度：{env.get('effort') or '未指定（模型默认）'}\n- 轮数：{env['rounds']}（每轮随机交替，种子 {env['seed']}），超时 {env['timeout_s']}s，间隔 {env['gap_s']}s，预热 {'是' if env['warmup'] else '否'}\n"
+                f"- 推理强度：{env.get('effort') or '未指定（模型默认）'}\n- 轮数：{env['rounds']}（每轮随机交替，种子 {env['seed']}），超时 {env['timeout_s']}s，逻辑任务间隔 {env['gap_s']}s，并发 {env.get('concurrency', 1)}，连接 {env.get('connection_mode', 'reuse')}，预热 {'是' if env['warmup'] else '否'}\n"
                 f"- 接口：{'；'.join(e['name'] + ' ' + e['base_url'] + ' (' + e['api'] + ')' for e in env['endpoints'])}\n"
                 f"- 冷连接握手：{json.dumps(env.get('handshake_s'), ensure_ascii=False)}\n- 脚本版本：{env['tool_version']}\n\n## 结论\n\n{result['conclusion']}\n\n## 汇总\n\n")
         f.write("| 场景 | 模型 | 成功 | 正确 | 总耗时 中位 / p95(n≥20)或最大 | 首字 中位 | 首个事件 中位 | 速度 tokens/s |\n|---|---|---|---|---|---|---|---|\n")
@@ -1009,6 +1222,10 @@ def write_report(path, result):
                     f"{fmt(t and t['median'])} / {fmt(t and (t['p95'] if t['p95_ok'] else t['max']))} | {fmt(ft and ft['median'])}{' (非流式)' if r['buffered_n'] else ''} | {fmt(fe and fe['median'])} | "
                     f"{sp['median'] if sp else (str(r['tps_overall']['median']) + '(含等待)' if r['tps_overall'] else '-')} |\n")
         f.write("\n（* = 样本不足）\n")
+        f.write(f"\n## {SLO_SECONDS} 秒限时完成\n\n逻辑任务开始后计算；对有判分的任务须答对，失败和超时计入分母，不含调度等待。\n\n")
+        for r in rows:
+            if r.get("slo_rate") is not None:
+                f.write(f"- {r['label']} [{r['scenario']}]：{r['slo_n']}/{r['n']}；重连任务 {r['retry_n']}\n")
         fp = result.get("fingerprint")
         if fp:
             f.write("\n## 模型指纹（数值分布对账）\n\n")
@@ -1037,6 +1254,9 @@ def main():
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--timeout", type=int, default=90)
     ap.add_argument("--gap", type=float, default=1.5)
+    ap.add_argument("--concurrency", type=int, choices=range(1, 5), default=1, help="并发逻辑任务数 1–4；可能增加费用与限流")
+    ap.add_argument("--connection-mode", choices=("reuse", "cold"), default="reuse", help="每工作线程复用连接或每任务新建连接；不控制上游缓存")
+    ap.add_argument("--seed", type=int, help="随机种子；复用后可生成相同题目实例和调度顺序")
     ap.add_argument("--no-warmup", action="store_true")
     ap.add_argument("--effort", default="", choices=[e for e in EFFORTS], help="推理强度（不写 = 不指定）")
     ap.add_argument("--name", help="测试名称，文件夹变成 日期-序号_名称（中文、字母、数字、-、_，最长 30 字）")
@@ -1045,8 +1265,8 @@ def main():
     if not ep:
         sys.exit("找不到接口：" + a.endpoint)
     params = {"selection": [{"endpoint": ep["id"], "models": a.model or ep["models"]}], "scenarios": a.scenario or ["speed"], "prompt": a.prompt,
-              "rounds": a.rounds, "timeout": a.timeout, "context": a.context, "gap": a.gap, "warmup": not a.no_warmup, "name": a.name or "", "effort": a.effort}
+              "rounds": a.rounds, "timeout": a.timeout, "context": a.context, "gap": a.gap, "warmup": not a.no_warmup, "name": a.name or "", "effort": a.effort, "concurrency": a.concurrency, "connection_mode": a.connection_mode, "seed": a.seed}
+    from . import server
+    params = server.validate(params)
     res = store.execute(params, lambda u: print(u.get("current", ""), flush=True) if u.get("current") else None, threading.Event())
     print("\n" + res["conclusion"] + "\n\n结果目录：" + store.run_dir(res["id"]))
-
-

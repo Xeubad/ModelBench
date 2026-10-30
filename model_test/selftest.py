@@ -89,7 +89,7 @@ class Fake(BaseHTTPRequestHandler):
         think = model == "reason-gen"  # 先“思考”0.5 秒（不可见），再每 0.1 秒吐一个字；usage 里 100 个输出 tokens 其中 60 个是推理
         slow = model in ("slow-gen", "reason-gen")
         if model == "quiz-good":
-            text = next((q["ans"] for q in core.QUIZ if q["prompt"] == user), "好")
+            text = next((q["ans"] for q in core.QUIZ + core.QUIZ_EXTENDED if q["prompt"] == user), "好")
         elif model == "quiz-bad":
             text = "不知道"
         elif model == "echo-effort":
@@ -97,7 +97,11 @@ class Fake(BaseHTTPRequestHandler):
         elif slow:
             text = "一二三四五"
         elif model == "needle-good":
-            text = "青竹-7392"
+            if "目标编号是多少" in user:
+                found = re.search(r"【目标记录】目标编号：(MB-\d+)。", user)
+                text = found.group(1) if found else "未知"
+            else:
+                text = "青竹-7392"
         elif model == NONSTREAM:  # 非流式 JSON 响应：不走 SSE 分支，直接在下面一次性返回
             return self._non_stream(body)
         elif model in ("fp-flat", "fp-flat2", "fp-peak", "fp-few"):
@@ -113,7 +117,9 @@ class Fake(BaseHTTPRequestHandler):
             if second:
                 if not chat and not any(isinstance(i, dict) and i.get("type") == "reasoning" for i in msgs):
                     return self._json(400, {"error": {"message": "reasoning_text must be passed back"}})
-                text = "单价是 128.5 元/包"
+                item = next(i for i in msgs if isinstance(i, dict) and (i.get("type") == "function_call_output" or i.get("role") == "tool"))
+                payload = json.loads(item.get("output") or item.get("content"))
+                text = json.dumps({"price": payload["price"], "unit": payload["unit"]}, ensure_ascii=False)
             else:
                 text = ""
                 calls = [{"id": "call_1", "name": "lookup_price", "arguments": json.dumps({"item": "MET混合滤料包"}, ensure_ascii=False)}]
@@ -288,7 +294,7 @@ def run_checks():
             "异分布": v.get(("fake/fp-flat", "fake/fp-peak")),
             "样本不足": v.get(("fake/fp-flat", "fake/fp-few")),
         }
-        ok = got == {"同分布": "指纹一致", "异分布": "指纹不一致", "样本不足": "样本不足（不作判断）"}
+        ok = got == {"同分布": "数值分布接近（不证明身份）", "异分布": "数值分布差异较大（不证明身份）", "样本不足": "样本不足（不作判断）"}
         return ok, f"同分布→{got['同分布']}，异分布→{got['异分布']}，少样本→{got['样本不足']}（有效数字 {fp['labels']['fake/fp-few']['n_numbers']} 个）"
     check("模型指纹：数值分布距离与拒判", fingerprint)
 

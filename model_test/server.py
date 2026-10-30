@@ -11,9 +11,13 @@
 - 不改 OpenClaw 配置（“导入”只读取它），不经过网关，不影响微信用户。
 """
 import argparse
+import base64
 import json
 import os
 import re
+import secrets
+import socket
+import sys
 import subprocess
 import threading
 import urllib.parse
@@ -33,8 +37,100 @@ JOB = {"state": "idle"}
 STOP = threading.Event()
 
 
+LAN = {"srv": None, "host": None, "port": None, "token": None}  # 局域网访问：会话级，重启即失效
+
+
 def running():
     return JOB.get("state") in ("starting", "running")
+
+
+def lan_ips():
+    """本机可用的局域网 IPv4 地址（排除回环）。UDP connect 只为问内核要默认出口网卡的地址，不实际发包。"""
+    found = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.settimeout(0.2)
+            s.connect(("8.8.8.8", 80))
+            found.append(s.getsockname()[0])
+        finally:
+            s.close()
+    except OSError:
+        pass
+    try:
+        for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+            found.append(ip)
+    except OSError:
+        pass
+    out = []
+    for ip in found:
+        if ip == "0.0.0.0" or ip.startswith("127.") or ip in out:
+            continue
+        try:
+            socket.inet_aton(ip)
+        except OSError:
+            continue
+        out.append(ip)
+    return out
+
+
+def lan_denied_html():
+    """局域网访问没带令牌时给的提示页（比 JSON 报错友好，也说明怎么拿令牌）。"""
+    return ("<!doctype html><meta charset=\"utf-8\"><title>需要访问令牌</title>"
+            "<body style=\"font:14px/1.8 -apple-system,PingFang SC,sans-serif;background:#0a0d12;color:#dce3ed;"
+            "max-width:520px;margin:14vh auto;padding:0 24px\">"
+            "<h2 style=\"color:#ffb454;font-weight:600\">需要访问令牌</h2>"
+            "<p>这个 ModelBench 实例允许局域网访问，但每个设备都要用<b>带令牌的地址</b>打开。</p>"
+            "<p>请在运行 ModelBench 的那台电脑上，打开它的「局域网访问」设置，复制完整地址"
+            "（形如 <code style=\"background:#151b28;padding:2px 6px;border-radius:3px\">http://192.168.x.x:18889/?k=…</code>）"
+            "再打开。</p>"
+            "<p style=\"color:#6b7789;font-size:12.5px\">令牌只在本机启动后有效，关闭局域网访问或重启服务即失效。</p>"
+            "</body>").encode("utf-8")
+
+
+def lan_start(port):
+    """在检测到的局域网地址上开额外监听。返回可访问地址；失败抛 ValueError。"""
+    if LAN["srv"] is not None:
+        return lan_info()
+    ips = lan_ips()
+    if not ips:
+        raise ValueError("没有检测到局域网地址（本机可能没连网络）")
+    errs = []
+    for host in ips:  # 逐个试，跳过不可绑定的（如已被占用的虚拟网卡）
+        try:
+            srv = ThreadingHTTPServer((host, port), Handler)
+        except OSError as e:
+            errs.append(f"{host}（{e}）")
+            continue
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        LAN.update(srv=srv, host=host, port=port, token=base64.urlsafe_b64encode(os.urandom(18)).decode().rstrip("="))
+        return lan_info()
+    raise ValueError("局域网地址都绑定不上：" + "；".join(errs))
+
+
+def lan_stop():
+    srv = LAN.get("srv")
+    if srv is not None:
+        try:
+            srv.shutdown()
+            srv.server_close()
+        except Exception:  # noqa: BLE001
+            pass
+    LAN.update(srv=None, host=None, port=None, token=None)
+
+
+def lan_info():
+    """给页面看的局域网状态。令牌只回传给本机请求，不回传给已经连上的局域网设备。"""
+    on = LAN["srv"] is not None
+    return {"enabled": on, "host": LAN["host"], "port": LAN["port"], "token": LAN["token"],
+            "url": (f"http://{LAN['host']}:{LAN['port']}/?k={LAN['token']}" if on else None),
+            "candidates": lan_ips()}
+
+
+def is_lan_addr(addr):
+    """这个监听地址是不是对外（非回环）。"""
+    return bool(addr) and not str(addr).startswith("127.")
 
 
 def run_job(params):
@@ -53,7 +149,7 @@ def run_job(params):
         res = store.execute(params, emit, STOP)
         with LOCK:
             JOB.update(state=res["state"], rows=res["summary"], conclusion=res["conclusion"], run_id=res["id"], records=res["records"],
-                       fingerprint=res.get("fingerprint"), current="")
+                       fingerprint=res.get("fingerprint"), env=res.get("env"), current="")
     except Exception as e:  # noqa: BLE001
         with LOCK:
             JOB.update(state="error", error=f"{type(e).__name__}: {e}")
@@ -97,11 +193,23 @@ def validate(body):
     effort = body.get("effort", "")
     if effort not in core.EFFORTS:
         raise ValueError("推理强度只能是 不指定 / low / medium / high")
-    n = rounds * sum(len(s["models"]) for s in selection) * len(core.build_tasks(scen, "x", 0))
+    concurrency = body.get("concurrency", 1)
+    if not isinstance(concurrency, int) or isinstance(concurrency, bool) or not 1 <= concurrency <= 4:
+        raise ValueError("并发范围 1–4")
+    connection_mode = body.get("connection_mode", "reuse")
+    if connection_mode not in ("reuse", "cold"):
+        raise ValueError("连接模式只能为 reuse / cold")
+    seed = body.get("seed")
+    if seed is not None and (not isinstance(seed, int) or isinstance(seed, bool) or not 0 <= seed < 2 ** 31):
+        raise ValueError("种子必须是 0 到 2147483647 的整数或留空")
+    tasks = core.build_tasks(scen, "x", 0)
+    n = rounds * sum(len(s["models"]) for s in selection) * sum(2 if t["kind"] == "tool" else 1 for t in tasks)
+    n += sum(len(s["models"]) for s in selection) if body.get("warmup", True) is not False else 0
     if n > MAX_REQUESTS:
-        raise ValueError(f"一次最多 {MAX_REQUESTS} 个请求（轮数 × 模型数 × 题数），当前 {n}")
+        raise ValueError(f"一次最多 {MAX_REQUESTS} 个预定请求（含预热与工具两步，不含连接重试），当前 {n}")
     return {"selection": selection, "scenarios": scen, "prompt": (prompt or "").strip(), "rounds": rounds, "timeout": timeout,
-            "context": context, "gap": float(gap), "name": name.strip(), "effort": effort, "warmup": body.get("warmup", True) is not False}
+            "context": context, "gap": float(gap), "name": name.strip(), "effort": effort, "warmup": body.get("warmup", True) is not False,
+            "concurrency": concurrency, "connection_mode": connection_mode, "seed": seed}
 
 
 def public_config():
@@ -117,16 +225,51 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *a):  # 不把请求内容写到终端
         pass
 
+    def _allowed_hosts(self):
+        hosts = list(BIND_HOSTS) + ["localhost"]
+        if LAN["srv"] is not None:
+            hosts.append(LAN["host"])
+        return [f"{h}:{PORT}" for h in hosts if h]
+
+    def _is_lan_request(self):
+        """这个请求走的是对外监听（局域网），还是只监听本机的那个。"""
+        addr = (getattr(self.server, "server_address", None) or (None,))[0]
+        return is_lan_addr(addr)
+
+    def _token_ok(self):
+        """局域网请求的令牌校验：先看 cookie，再看 ?k= 查询参数。"""
+        want = LAN.get("token")
+        if not want:
+            return False
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            name, _, val = part.strip().partition("=")
+            if name == "mbtoken" and val == want:
+                return True
+        qs = urllib.parse.urlsplit(self.path).query
+        return urllib.parse.parse_qs(qs).get("k", [""])[0] == want
+
     def _ok_origin(self):
         host = (self.headers.get("Host") or "").lower()
-        allowed = [f"{h}:{PORT}" for h in BIND_HOSTS + ["localhost"]]
+        allowed = self._allowed_hosts()
         if host not in allowed:
             return False
         origin = self.headers.get("Origin")
-        return origin is None or origin.lower() in [f"http://{a}" for a in allowed]
+        if origin is not None and origin.lower() not in [f"http://{a}" for a in allowed]:
+            return False
+        if self._is_lan_request():
+            if not self._token_ok():
+                return False
+            # 用 ?k= 打开过之后种 cookie，后续同源请求就不用一直带参数了
+            if "mbtoken=" not in (self.headers.get("Cookie") or ""):
+                self._set_token_cookie = True
+        return True
 
     def _send(self, code, body, ctype="application/json; charset=utf-8", extra=None):
         data = body if isinstance(body, bytes) else (body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)).encode("utf-8")
+        extra = dict(extra or {})
+        if getattr(self, "_set_token_cookie", False) and LAN.get("token"):
+            extra["Set-Cookie"] = f"mbtoken={LAN['token']}; Path=/; SameSite=Lax; Max-Age=86400"
+            self._set_token_cookie = False
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -139,6 +282,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if not self._ok_origin():
+            if self._is_lan_request():
+                return self._send(403, lan_denied_html(), "text/html; charset=utf-8")
             return self._send(403, {"error": "forbidden"})
         path = self.path.split("?")[0]
         try:
@@ -154,6 +299,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, dict(JOB))
             if path == "/api/history":
                 return self._send(200, {"runs": store.history()})
+            if path == "/api/network":
+                info = lan_info()
+                if self._is_lan_request():
+                    info["token"] = info["url"] = None  # 令牌只回给本机，避免已连上的设备互相串联
+                return self._send(200, info)
             upath = urllib.parse.unquote(path)  # 测试名称可含中文，URL 里是百分号编码
             m = re.match(r"^/api/run/([^/]+)$", upath)
             if m:
@@ -212,6 +362,18 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/run/delete":
                 store.delete_run(str(body.get("id")))
                 return self._send(200, {"ok": True})
+            if path == "/api/network":
+                want = body.get("enable")
+                if not isinstance(want, bool):
+                    raise ValueError("参数 enable 必须是 true 或 false")
+                if want:
+                    info = lan_start(PORT)
+                    info["candidates"] = lan_ips()
+                else:
+                    lan_stop()
+                    info = lan_info()
+                info["warning"] = ("页面没有登录，同网段任何人拿到这个地址都能使用你保存的接口密钥。" if want else None)
+                return self._send(200, info)
             if path == "/api/merge":
                 ids = body.get("ids")
                 if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
@@ -245,6 +407,10 @@ def make_servers(port):
 
 def main():
     global PORT
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # 重定向到日志文件时也能立刻看到启动提示
+    except (AttributeError, ValueError):
+        pass
     ap = argparse.ArgumentParser(prog="python3 -m model_test serve", description="模型测试平台（网页）")
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
@@ -257,6 +423,10 @@ def main():
     for n in notes:
         print(n)
     url = f"http://127.0.0.1:{PORT}"
+    ips = lan_ips()
+    if ips:
+        print("局域网访问：在页面“局域网访问”里打开开关（默认关闭，开启后生成带令牌的地址）")
+        print("  本机可用地址：" + "、".join(f"http://{ip}:{PORT}" for ip in ips))
     print(f"模型测试平台已启动：{url}（Ctrl+C 退出）")
     if args.open:  # 用 macOS 的 open，不走 webbrowser（在 VS Code 终端里它会连 VS Code 的已失效通道而报错）
         subprocess.run(["open", url], check=False)
@@ -264,4 +434,3 @@ def main():
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\n已退出")
-

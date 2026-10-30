@@ -239,21 +239,24 @@ def save_result(result, records):
         os.chmod(os.path.join(d, name), 0o444)  # 保存后不再改动
 
 
-def _cond(env, sc):
-    """同一条趋势线必须“条件相同”：推理强度 + （固定内容的场景用提示词指纹；自定义提示词连同背景长度一起算进指纹）。"""
+def _cond(env, sc, run_id=None):
+    """趋势线条件未知时按运行分开，不假设历史结果可比。"""
     eff = env.get("effort") or ""
-    fp = (env.get("prompt_fingerprints") or {}).get(sc, "")
     label = "强度 " + (eff or "未指定")
     if sc == "speed":
         label = f"提示词「{(env.get('prompt') or '')[:14]}」 · 背景 {env.get('context_tokens') or '无'} · " + label
-    return f"{eff}|{fp}", label
+    return core.cond_of(env, sc) or "unknown:" + str(run_id or "unverified"), label
 
 
 def _meta_new(run_id, d):
     env = d.get("env", {})
+    def trend_condition(row):
+        cond, label = _cond(env, row["scenario"], run_id)
+        service = core.service_of(env, row["label"]) or "unknown:" + run_id
+        return {"cond": cond + "|" + service, "cond_label": label}
     return {"id": run_id, "created": env.get("created", ""), "scenarios": env.get("scenarios", []), "models": env.get("models", []),
             "name": env.get("name", ""), "n": len(d.get("records", [])), "state": d.get("state", "done"), "rounds": env.get("rounds"), "legacy": False,
-            "brief": [dict(zip(("cond", "cond_label"), _cond(env, r["scenario"])), label=r["label"], scenario=r["scenario"],
+            "brief": [dict(trend_condition(r), label=r["label"], scenario=r["scenario"],
                            total_median=(r["total"] or {}).get("median"), pass_rate=r["pass_rate"]) for r in d.get("summary", [])]}
 
 
@@ -371,7 +374,8 @@ def execute(params, emit, stop):
         plan_eps[eid] = ep
     plan = {"endpoints": plan_eps, "models": models, "tasks": core.build_tasks(params["scenarios"], params["prompt"], params["context"]),
             "rounds": params["rounds"], "timeout": params["timeout"], "gap": params["gap"], "warmup": params["warmup"],
-            "effort": params.get("effort", ""), "seed": random.randrange(1 << 31)}
+            "effort": params.get("effort", ""), "concurrency": params.get("concurrency", 1), "connection_mode": params.get("connection_mode", "reuse"),
+            "seed": params["seed"] if params.get("seed") is not None else random.randrange(1 << 31)}
     run_id = new_run_dir(params.get("name"))
     created = now_iso()
     emit({"run_id": run_id, "total": plan["rounds"] * len(models) * len(plan["tasks"]), "done": 0})

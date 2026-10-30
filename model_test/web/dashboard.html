@@ -162,6 +162,8 @@ svg text{fill:var(--ink2);font-size:11.5px;font-family:var(--mono)}svg .m{fill:v
 details summary{cursor:pointer;color:var(--amber2);font-size:12px}
 details summary:hover{color:var(--amber)}
 .msg{font-size:11.5px;margin-top:7px;font-family:var(--mono);line-height:1.7}
+.lan-url{display:block;margin-top:5px;padding:7px 10px;background:#0b0f16;border:1px solid var(--line2);border-radius:3px;
+  font-family:var(--mono);font-size:11.5px;color:var(--amber2);word-break:break-all;user-select:all}
 /* 下载按钮：次级操作，幽灵样式 + 等宽字体 */
 .btn-dl{display:inline-flex;align-items:center;gap:6px;margin-left:auto;padding:6px 14px;font-family:var(--mono);
   font-size:11.5px;letter-spacing:.3px;color:var(--ink2);text-decoration:none;border:1px solid var(--line2);border-radius:3px;
@@ -269,14 +271,29 @@ th.sortable:hover{color:var(--amber)}
       <span style="font-size:11.5px;font-family:var(--mono);color:var(--ink2)">轮数 <input type="number" id="rounds" value="5" min="1" max="10" title="每个模型×题目测几轮；少于 5 轮会标“样本不足”"></span>
       <span style="font-size:11.5px;font-family:var(--mono);color:var(--ink2)">超时 <input type="number" id="timeout" value="90" min="10" max="300"> 秒</span>
       <span style="font-size:11.5px;font-family:var(--mono);color:var(--ink2)">间隔 <input type="number" id="gap" value="1.5" min="0" max="10" step="0.5"> 秒</span>
+      <span style="font-size:11.5px;font-family:var(--mono);color:var(--ink2)">并发 <input type="number" id="concurrency" value="1" min="1" max="4" title="并发按逻辑任务计；工具第二步不受任务间隔约束。可能增加费用和触发限流"></span>
+      <span style="font-size:11.5px;color:var(--ink2)">连接 <select id="connectionMode" title="冷连接每个逻辑任务新建连接；不控制服务端缓存"><option value="reuse">复用</option><option value="cold">每任务新建</option></select></span>
+      <span style="font-size:11.5px;color:var(--ink2)">种子 <input type="number" id="seed" min="0" max="2147483647" placeholder="留空随机" title="复用种子以重现同一轮工具结果和上下文案例"></span>
     </div>
     <div class="row"><span style="font-size:11.5px;font-family:var(--mono);color:var(--ink2)">推理强度</span>
-      <select id="effort" style="width:auto" title="比较思考型和非思考型模型时，建议统一强度，否则耗时差来自“思考多久”而不是网络"><option value="">不指定（模型默认）</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></div>
+      <select id="effort" style="width:auto" title="不同模型对推理强度参数的支持和含义可能不同，统一参数不保证相同计算预算"><option value="">不指定（模型默认）</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></div>
     <div class="chk"><input type="checkbox" id="warmup" checked><label for="warmup" style="font-size:11.5px;color:var(--ink2)">每个模型先预热一次（不计入结果）</label></div>
     <div class="chk"><input type="checkbox" id="useName"><label for="useName" style="font-size:11.5px;color:var(--ink2)">自定义测试名称（方便以后按名字找文件）</label></div>
     <input type="text" id="runName" class="hidden" maxlength="30" placeholder="例如 AB平台对比（中文、字母、数字、-、_）">
     <div class="msg mute hidden" id="nameHint"></div>
-    <div class="mute" style="font-size:11px;margin-top:7px;line-height:1.7">每一轮把“全部模型 × 全部题目”随机打乱顺序再发；同一接口两次请求之间留间隔，避免限流。</div>
+    <div class="mute" style="font-size:11px;margin-top:7px;line-height:1.7">每轮随机安排逻辑任务；并发时按任务开始间隔，串行按任务结束间隔。工具第二步与连接重试不受该间隔约束，不能保证避免限流。</div>
+
+    <h2>局域网访问 <span class="sp"></span><span class="tag" id="lanState">关闭</span></h2>
+    <div class="chk"><input type="checkbox" id="lanToggle"><label for="lanToggle" style="font-size:11.5px;color:var(--ink2)">允许同一局域网的其他设备访问（手机 / 平板 / 另一台电脑）</label></div>
+    <div id="lanBox" class="hidden">
+      <div class="mute" style="font-size:11px;margin-top:6px">在别的设备上打开这个地址（带访问令牌）：</div>
+      <code id="lanUrl" class="lan-url"></code>
+      <div class="row" style="margin-top:7px"><button class="ghost sm" id="lanCopy">复制地址</button><span class="mute" id="lanHost" style="font-size:11px"></span></div>
+      <div class="warnbox" style="font-size:11.5px;padding:9px 12px;margin:8px 0 0;line-height:1.75">
+        ⚠ 页面没有登录：拿到这个地址的人在它有效期内都能使用你保存的接口密钥发请求。
+        不用时请关闭开关；令牌只在本次运行有效，重启即失效。</div>
+    </div>
+    <div class="msg" id="lanMsg"></div>
   </div>
   <div class="foot">
     <div class="row" style="margin-top:0"><button id="run">开始测试</button><button id="stop" class="ghost hidden">停止</button><span class="mute" id="est" style="font-family:var(--mono);font-size:11px"></span></div>
@@ -330,12 +347,11 @@ th.sortable:hover{color:var(--amber)}
 
   <div id="tab-merge" class="hidden">
     <div id="mergeEmpty" class="panel mute">
-      <b style="color:var(--ink2)">合并检验：把多次测试的样本合起来算，提高检验力</b>
+      <b style="color:var(--ink2)">合并统计：汇总条件与接口身份一致的测试</b>
       <div style="margin-top:8px;line-height:1.9">
-        单次测试受“轮数上限”限制，每组样本往往只有十几个，真实差距 30% 以内很难检出“显著”。
-        把<b>条件相同</b>的多次测试合并后，样本量翻倍，同样一套统计就能给出更可靠的结论。<br>
+        结果仅作描述；重复请求可能相关，增加请求数不保证推断可靠。<br>
         用法：到“历史与趋势”里勾选 2 条以上结果，点“合并所选”。<br>
-        <span class="mute">只有推理强度、提示词/背景、采样参数都相同的结果才会被合并；条件不同的会分开统计并注明。</span>
+        <span class="mute">条件摘要、测量方法和接口身份须完整且一致；缺少字段的历史结果会分开统计。</span>
       </div>
     </div>
     <div id="mergeBody"></div>
@@ -447,24 +463,58 @@ function renderModels() {
 }
 function renderScen() {
   $("scen").innerHTML = Object.entries(cfg.scenarios).map(([k, v]) =>
-    `<div class="chk"><input type="checkbox" id="sc_${k}" data-sc="${k}" ${chosenSc.has(k) ? "checked" : ""}><label for="sc_${k}">${esc(v)}</label><span>${cfg.tasks_per_scenario[k]} 个请求/轮/模型</span></div>`).join("");
+    `<div class="chk"><input type="checkbox" id="sc_${k}" data-sc="${k}" ${chosenSc.has(k) ? "checked" : ""}><label for="sc_${k}">${esc(v)}</label><span>${cfg.tasks_per_scenario[k]} 个任务/轮/模型${k === "tool" ? "（最多 2 次请求/任务）" : ""}</span></div>`).join("");
   $("scen").querySelectorAll("input").forEach(i => i.onchange = () => { i.checked ? chosenSc.add(i.dataset.sc) : chosenSc.delete(i.dataset.sc); saveSel(); updateEst(); });
 }
 function validSelected() { const ids = new Set(endpoints.map(e => e.id)); return [...selected].filter(k => { const [id, m] = k.split(SEP); const e = endpoints.find(x => x.id === id); return ids.has(id) && e.models.includes(m); }); }
 function updateEst() {
-  const n = validSelected().length, tasks = [...chosenSc].reduce((a, s) => a + (cfg.tasks_per_scenario[s] || 0), 0), r = +$("rounds").value || 1;
+  const n = validSelected().length, tasks = [...chosenSc].reduce((a, s) => a + (cfg.tasks_per_scenario[s] || 0) * (s === "tool" ? 2 : 1), 0), r = +$("rounds").value || 1;
   // 预热会给每个模型多发 1 次请求，估算要算进去，否则显示的时间偏短
   const warm = $("warmup").checked ? n : 0;
   const total = n * tasks * r + warm;
   $("selcount").textContent = `已选 ${n} 个`; $("speedBox").classList.toggle("hidden", !chosenSc.has("speed"));
-  $("est").textContent = total ? `共 ${total} 个请求${warm ? `（含 ${warm} 次预热）` : ""}，约 ${Math.max(1, Math.ceil(total * (3 + (+$("gap").value || 0)) / 60))} 分钟` : "";
+  $("est").textContent = total ? `预定最多 ${total} 次请求${warm ? `（含 ${warm} 次预热）` : ""}，不含连接重试；耗时与费用取决于接口及输出` : "";
 }
 function saveSel() { store.set("sel", [...selected]); store.set("sc", [...chosenSc]); }
-function savePrm() { store.set("prm", {prompt: $("prompt").value, context: $("context").value, rounds: $("rounds").value, timeout: $("timeout").value, gap: $("gap").value, warmup: $("warmup").checked, effort: $("effort").value, useName: $("useName").checked, runName: $("runName").value}); }
+function savePrm() { store.set("prm", {prompt: $("prompt").value, context: $("context").value, rounds: $("rounds").value, timeout: $("timeout").value, gap: $("gap").value, concurrency: $("concurrency").value, seed: $("seed").value, connectionMode: $("connectionMode").value, warmup: $("warmup").checked, effort: $("effort").value, useName: $("useName").checked, runName: $("runName").value}); }
 function nameUi() {
   const on = $("useName").checked, n = $("runName").value.trim(), d = new Date(), pad = x => String(x).padStart(2, "0");
   $("runName").classList.toggle("hidden", !on); $("nameHint").classList.toggle("hidden", !on);
   $("nameHint").textContent = `将保存为 results/${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-<当天序号>${n ? "_" + n : "_（请填写名称）"}/`;
+}
+
+/* ---------------- 局域网访问 ---------------- */
+function lanRender(info) {
+  const on = !!(info && info.enabled);
+  $("lanToggle").checked = on;
+  $("lanState").textContent = on ? "已开启" : "关闭";
+  $("lanState").className = "tag " + (on ? "ok" : "");
+  $("lanBox").classList.toggle("hidden", !on);
+  if (on) {
+    $("lanUrl").textContent = info.url || "";
+    $("lanHost").textContent = info.candidates && info.candidates.length ? "本机可用：" + info.candidates.join("、") : "";
+  } else {
+    $("lanUrl").textContent = "";
+    $("lanHost").textContent = "";
+  }
+}
+async function lanLoad() {
+  try { lanRender(await api("/api/network")); }
+  catch (e) { $("lanMsg").className = "msg err"; $("lanMsg").textContent = "读取局域网状态失败：" + e.message; }
+}
+async function lanToggle(on) {
+  $("lanToggle").disabled = true;
+  $("lanMsg").className = "msg mute"; $("lanMsg").textContent = on ? "正在开启…" : "正在关闭…";
+  try {
+    const info = await api("/api/network", {enable: on});
+    lanRender(info);
+    $("lanMsg").className = "msg " + (on ? "ok" : "mute");
+    $("lanMsg").textContent = on ? "已开启。用上面地址在手机/平板上打开即可。" : "已关闭，局域网不能再访问。";
+  } catch (e) {
+    $("lanMsg").className = "msg err"; $("lanMsg").textContent = e.message;
+    $("lanToggle").checked = !on;  // 失败回滚开关
+  }
+  $("lanToggle").disabled = false;
 }
 
 /* ---------------- 启动与进度 ---------------- */
@@ -476,7 +526,7 @@ async function start() {
   validSelected().forEach(k => { const [id, m] = k.split(SEP); (by[id] = by[id] || []).push(m); });
   try {
     await api("/api/run", {selection: Object.entries(by).map(([endpoint, models]) => ({endpoint, models})), scenarios: [...chosenSc], prompt: $("prompt").value,
-      rounds: +$("rounds").value, timeout: +$("timeout").value, context: +$("context").value, gap: +$("gap").value, warmup: $("warmup").checked, name: runName, effort: $("effort").value});
+      rounds: +$("rounds").value, timeout: +$("timeout").value, context: +$("context").value, gap: +$("gap").value, concurrency: +$("concurrency").value, seed: $("seed").value === "" ? null : +$("seed").value, connection_mode: $("connectionMode").value, warmup: $("warmup").checked, name: runName, effort: $("effort").value});
   } catch (e) { $("runErr").textContent = e.message; return; }
   savePrm(); lastSig = ""; setRunning(true); tab("result"); polling = setInterval(poll, 800); poll();
 }
@@ -497,7 +547,7 @@ async function poll() {
     // 结果已随轮询拿到（与落盘内容一致），直接切到“已完成”标题，不再重新拉一次：
     // 免得用户展开的明细被收起、场景 tab 被重置，还多一次 HTTP 请求
     if (j.run_id && j.records && j.records.length) {
-      show({id: j.run_id, rows: j.rows, records: j.records, conclusion: j.conclusion, env: null, fingerprint: j.fingerprint}, `测试结果 ${j.run_id}（${j.state === "stopped" ? "已停止" : "已完成"}）`);
+      show({id: j.run_id, rows: j.rows, records: j.records, conclusion: j.conclusion, env: j.env || null, fingerprint: j.fingerprint}, `测试结果 ${j.run_id}（${j.state === "stopped" ? "已停止" : "已完成"}）`);
       location.hash = "run=" + encodeURIComponent(j.run_id);
     } else if (j.run_id) {  // 没有轮询到记录（比如一开始就失败），回退到按 id 拉取
       openRun(j.run_id);
@@ -517,14 +567,14 @@ function fpHellinger(a, b) {
 }
 function fpVerdict(dist, noise) {
   const thr = Math.max(FP_NOISE * (noise || 0), FP_FLOOR);
-  return {thr, v: dist <= thr ? "指纹一致" : dist >= 2 * thr ? "指纹不一致" : "差异不明显（不作判断）"};
+  return {thr, v: dist <= thr ? "数值分布接近（不证明身份）" : dist >= 2 * thr ? "数值分布差异较大（不证明身份）" : "差异不明显（不作判断）"};
 }
-function fpTag(v) { return `<span class="tag ${v === "指纹一致" ? "ok" : v === "指纹不一致" ? "bad" : "warn"}">${esc(v)}</span>`; }
+function fpTag(v) { const safe = v === "指纹一致" ? "历史结果：数值分布接近（不证明身份）" : v === "指纹不一致" ? "历史结果：数值分布差异较大（不证明身份）" : v; return `<span class="tag warn">${esc(safe)}</span>`; }
 function fpPanel(fp) {
   $("fpPanel").classList.toggle("hidden", !fp);
   if (!fp) return;
   const labels = fp.labels || {}, names = Object.keys(labels);
-  let html = `<div class="mute" style="font-size:12.5px;margin-bottom:6px">让模型输出无语义随机整数，比较数值分布的 Hellinger 距离（0 = 同分布）。判定线由同模型自身的抽样噪声决定，数字不够会拒判。指纹是启发式证据，不是身份认证；跨次测试（如直连 vs 中转）的对账在“对比”页。</div>`;
+  let html = `<div class="mute" style="font-size:12.5px;margin-bottom:6px">比较输出数值分布的 Hellinger 距离。阈值未经真实模型误报率校准，数字并非独立样本；接近或差异均不能证明模型身份。</div>`;
   const maxBin = Math.max(1, ...names.flatMap(n => labels[n].counts));
   html += names.map((n, i) => {
     const c = labels[n].counts, W = 540, H = 44, bw = (W - 210) / c.length;
@@ -546,7 +596,8 @@ function show(data, title) {
   $("resTitle").textContent = title;
   $("resDl").classList.toggle("hidden", !data.id);
   if (data.id) $("resDl").href = "/raw/" + encodeURIComponent(data.id) + ".json";
-  $("concl").textContent = data.conclusion || "测试进行中…";
+  const oldMethod = data.env && !data.env.method_version;
+  $("concl").textContent = (oldMethod ? "历史结果使用旧版测量与判定口径；以下为原始结论，不代表当前方法验证。\n" : "") + (data.conclusion || "测试进行中…");
   const scs = [...new Set(data.rows.map(r => r.scenario))];
   if (!viewSc || !scs.includes(viewSc)) viewSc = scs[0];
   $("scChips").innerHTML = scs.map(s => `<button data-s="${s}" class="${s === viewSc ? "on" : ""}">${esc(scName(s))}</button>`).join("");
@@ -581,7 +632,7 @@ function p95Text(t) { return t ? (t.p95_ok ? "p95 " + sec(t.p95) : "最大 " + s
 function mostlyBuffered(r) { return r.ok > 0 && r.buffered_n * 2 >= r.ok; }
 // 少数请求非流式时不算整体非流式（mostlyBuffered），但首字中位数会被这些请求污染，需要在表格和卡片上提示
 function someBuffered(r) { return r.ok > 0 && r.buffered_n > 0 && !mostlyBuffered(r); }
-function bufTag(r) { return someBuffered(r) ? ` <span class="tag warn" title="${r.buffered_n}/${r.ok} 个成功请求是中转站攒满后一次返回的，它们的“首字”不是真首字；首字中位数会被这些请求拉长。看明细里标了“非流式”的行。">部分非流式</span>` : ""; }
+function bufTag(r) { return someBuffered(r) ? ` <span class="tag warn" title="${r.buffered_n}/${r.ok} 个成功请求疑似非流式；新版本首字汇总排除这些请求，历史结果口径可能不同。">部分非流式</span>` : ""; }
 function cards(rows) {
   $("cards").innerHTML = rows.map(r => {
     const graded = r.pass_rate != null, good = r.ok === r.n && (!graded || r.pass_rate === 1), cls = r.ok === 0 ? "bad" : good ? "" : "warn";
@@ -589,14 +640,18 @@ function cards(rows) {
     const t = r.total, ft = r.first_token, buf = mostlyBuffered(r);
     return `<div class="card ${cls}"><b>${esc(r.label)}</b>${sampleTag(r)}${buf ? ' <span class="tag warn" title="响应几乎在最后一刻才一次性到达（中转站攒满后返回），首字不是模型真正的首字">非流式</span>' : ""}
       <div class="big">${graded ? `${r.pass_n}/${r.graded} 答对` : r.ok ? sec(t.median) : "全部失败"}</div>
-      <div class="ln">成功 <b>${r.ok}/${r.n}</b>（95% 区间 ${ciText(r.ok_ci)}）${graded ? ` · 正确率 <b>${pf(r.pass_rate)}</b>（${ciText(r.pass_ci)}${r.pass_ci_basis ? "，按 " + r.pass_units + " 个" + r.pass_ci_basis + "计" : ""}）` : ""}</div>
+      <div class="ln">成功 <b>${r.ok}/${r.n}</b>（Wilson 区间 ${ciText(r.ok_ci)}；重复请求可能相关）${graded ? ` · 正确率 <b>${pf(r.pass_rate)}</b>（固定题集描述性结果）` : ""}</div>
+      ${r.slo_rate != null ? `<div class="ln">${r.slo_seconds} 秒内完成${graded ? "且答对" : ""} <b>${r.slo_n}/${r.n}</b> · 含重连耗时中位 ${sec(r.wall_total && r.wall_total.median)} · 重连任务 ${r.retry_n}</div>` : ""}
+      ${r.cached_known ? `<div class="ln">提供方报告缓存命中 ${r.cached_hit_n}/${r.cached_known} 个成功请求（未知值不计）</div>` : ""}
+      ${r.returned_models && r.returned_models.length ? `<div class="ln">接口报告模型 ${r.returned_models.map(esc).join("、")}（不验证身份）</div>` : ""}
+      ${r.chars_per_second ? `<div class="ln">端到端正文字符/秒 ${r.chars_per_second.median}（含等待，质量与语言不同不可直接排名）</div>` : ""}
       ${t ? `<div class="ln">总耗时 中位 <b>${sec(t.median)}</b> · ${p95Text(t)} · 最小 ${sec(t.min)}${viewSc === "tool" ? "（两步合计）" : ""}</div>` : ""}
       ${r.gen ? `<div class="ln">第二步生成 中位 <b>${sec(r.gen.median)}</b>（与单次请求可比）</div>` : ""}
-      ${ft ? `<div class="ln">首字 中位 <b>${buf ? "不可信" : sec(ft.median)}</b>${buf ? "" : bufTag(r)} · 首个事件 ${sec(r.first_event && r.first_event.median)}${r.first_think ? " · 首个思考 " + sec(r.first_think.median) : ""}${r.queue_median ? ` · 排队 <b>${sec(r.queue_median)}</b>` : ""}</div>` : ""}
+      ${ft ? `<div class="ln">首字 中位 <b>${buf ? "不可信" : sec(ft.median)}</b>${buf ? "" : bufTag(r)} · 首个事件 ${sec(r.first_event && r.first_event.median)}${r.first_think ? " · 首个推理事件 " + sec(r.first_think.median) : ""}${r.queue_median ? ` · 响应头后首事件等待 <b>${sec(r.queue_median)}</b>` : ""}</div>` : ""}
       ${r.tps ? `<div class="ln">输出速度 <b>${r.tps.median}</b> tokens/s</div>` : r.tps_overall ? `<div class="ln">整体速度 <b>${r.tps_overall.median}</b> tokens/s（含等待）</div>` : ""}
-      ${r.reasoning_share != null ? `<div class="ln">推理 tokens 占输出 <b>${pf(r.reasoning_share)}</b>${r.reasoning_tokens ? "（中位 " + Math.round(r.reasoning_tokens.median) + "）" : ""}</div>` : r.think_share != null && !buf ? `<div class="ln">思考/排队占总耗时 <b>${pf(r.think_share)}</b></div>` : ""}
+      ${r.reasoning_share != null ? `<div class="ln">推理 tokens 占输出 <b>${pf(r.reasoning_share)}</b>${r.reasoning_tokens ? "（中位 " + Math.round(r.reasoning_tokens.median) + "）" : ""}</div>` : r.think_share != null && !buf ? `<div class="ln">首事件至首正文占总耗时 <b>${pf(r.think_share)}</b></div>` : ""}
       ${r.tin != null ? `<div class="ln">用量 ${r.tin}/${r.tout} tokens${r.cached ? "，缓存命中中位 " + r.cached : ""}${/^needle/.test(r.scenario) ? "（实际输入 " + r.tin.toLocaleString() + " tokens，标题里的“约 1 万/3 万”是估算）" : ""}</div>` : ""}
-      ${r.cache_trend && (r.cache_trend.speedup || 0) >= 1.3 ? `<div class="ln" style="color:var(--amber)"><b>⚠ 疑似前缀缓存污染</b>：首轮 ${sec(r.cache_trend.total_first)} → 末轮 ${sec(r.cache_trend.total_last)}（快 ${r.cache_trend.speedup}×，缓存 ${r.cache_trend.cached_first}→${r.cache_trend.cached_last} tokens），后几轮偏快会拉低中位数</div>` : ""}
+      ${r.cache_trend && (r.cache_trend.speedup || 0) >= 1.3 ? `<div class="ln" style="color:var(--amber)"><b>⚠ 缓存与耗时变化同时出现</b>：首条 ${sec(r.cache_trend.total_first)} → 末条 ${sec(r.cache_trend.total_last)}（快 ${r.cache_trend.speedup}×，缓存 ${r.cache_trend.cached_first}→${r.cache_trend.cached_last} tokens）；这不是因果证明</div>` : ""}
       ${r.consistency != null ? `<div class="ln">答案一致性 <b>${pf(r.consistency)}</b></div>` : ""}
       <div>${codeTags}</div></div>`;
   }).join("") || "<span class='mute'>无数据</span>";
@@ -607,16 +662,16 @@ const COLS = [
   {k: "ok", t: "成功率", get: r => r.n ? r.ok / r.n : null, fmt: r => `${r.ok}/${r.n}`, best: 1},
   {k: "pass", t: "正确率", get: r => r.pass_rate, fmt: r => r.pass_rate == null ? "-" : `${pf(r.pass_rate)} (${r.pass_n}/${r.graded})`, best: 1},
   {k: "total", t: "总耗时 中位", get: r => r.total && r.total.median, fmt: r => sec(r.total && r.total.median), best: -1,
-   title: "含排队等待的总耗时。只有在各模型输出 tokens 数接近时才可直接比；输出长度差得多时，请看 tokens/s"},
+   title: "成功请求耗时；输出长度、质量和网络路径均影响比较。"},
   {k: "tail", t: "p95 / 最大", get: r => r.total && (r.total.p95_ok ? r.total.p95 : r.total.max), fmt: r => p95Text(r.total), best: -1},
   {k: "ft", t: "首字 中位", get: r => mostlyBuffered(r) ? null : r.first_token && r.first_token.median, fmt: r => mostlyBuffered(r) ? "非流式" : sec(r.first_token && r.first_token.median), best: -1},
   {k: "fe", t: "首个事件", get: r => r.first_event && r.first_event.median, fmt: r => sec(r.first_event && r.first_event.median), best: -1},
   {k: "tps", t: "tokens/s", get: r => r.tps ? r.tps.median : null, fmt: r => r.tps ? String(r.tps.median) : r.tps_overall ? r.tps_overall.median + "（含等待）" : "-", best: 1},
   {k: "tout", t: "输出 tokens", get: r => r.tout, fmt: r => r.tout == null ? "-" : String(r.tout), title: "中位输出长度。总耗时只有在输出长度接近时才可比：输出短的天然占优。差异大时看 tokens/s"},
   {k: "per1k", t: "每千 tokens 耗时", get: r => r.sec_per_1k ? r.sec_per_1k.median : null, fmt: r => r.sec_per_1k ? sec(r.sec_per_1k.median) : "-", best: -1,
-   title: "总耗时 ÷ 输出千 tokens 数：把输出长度归一化后再比，输出长短不一时比“总耗时”更公平"},
-  {k: "think", t: "推理占比", get: r => r.reasoning_share ?? r.think_share, fmt: r => r.reasoning_share != null ? pf(r.reasoning_share) + "（tokens）" : r.think_share != null ? pf(r.think_share) + "（耗时）" : "-"},
-  {k: "queue", t: "排队", get: r => r.queue_median, fmt: r => r.queue_median == null ? "-" : sec(r.queue_median), best: -1, title: "响应头到首个数据事件的等待：服务端/中转站内部排队，不是网络也不是模型"},
+   title: "总耗时 ÷ 提供方报告的输出 tokens；固定等待和 tokenizer 差异仍会影响结果，不能保证跨模型公平。"},
+  {k: "think", t: "推理 tokens / 等待占比", get: r => r.reasoning_share ?? r.think_share, fmt: r => r.reasoning_share != null ? pf(r.reasoning_share) + "（tokens）" : r.think_share != null ? pf(r.think_share) + "（首事件至首正文）" : "-"},
+  {k: "queue", t: "响应头后等待", get: r => r.queue_median, fmt: r => r.queue_median == null ? "-" : sec(r.queue_median), title: "响应头到首个数据事件的客户端等待，无法单独归因于排队、网络或模型。"},
   {k: "cons", t: "一致性", get: r => r.consistency, fmt: r => pf(r.consistency), best: 1},
 ];
 function table(rows) {
@@ -647,7 +702,7 @@ function scatter(rows) {
 }
 function chartSeg(rows) {
   const tool = viewSc === "tool", ok = rows.filter(r => r.total);
-  $("segTitle").textContent = tool ? "总耗时（第二步生成，中位数；两步合计见总表）" : "分段耗时（中位数）：握手 / 排队 / 等首个事件 / 思考到首字 / 生成";
+  $("segTitle").textContent = tool ? "工具场景两步总耗时（中位数）" : "客户端观测时间（各指标中位数不构成单次请求的精确分段）";
   if (!ok.length) { $("chartSeg").innerHTML = "<span class='mute'>无成功请求</span>"; return; }
   // 整行宽画布 + 高行距 + 粗条：一个模型一行，读数不用眯眼
   const W = 1080, L = 250, BAR = 34, STEP = 62, H = STEP * rows.length + 96, max = Math.max(...ok.map(r => r.total.median)), sx = v => (W - L - 110) * v / max;
@@ -661,12 +716,12 @@ function chartSeg(rows) {
       s += `<rect x="${L}" y="${y}" width="${sx(tot)}" height="${BAR}" rx="4" fill="#ffb454"/><text x="${L + sx(tot) + 10}" y="${y + BAR / 2 + 5}" style="font-weight:600">${sec(tot)}</text>`;
       return;
     }
-    const hd = Math.min(r.connect ? r.connect.median : 0, tot), q = Math.min(r.queue_median || 0, tot, tot - hd);
+    const hd = 0, q = Math.min(r.queue_median || 0, tot);
     const fe = Math.min(r.first_event ? r.first_event.median : 0, tot), ft = Math.min(r.first_token ? r.first_token.median : fe, tot);
     const a = Math.max(fe - hd - q, 0), b = Math.max(ft - fe, 0), c = Math.max(tot - Math.max(ft, fe), 0);
     let x = L;
     // 每段都标数值（段够宽时才放，避免文字互相压）；悬停看名称
-    [[hd, "#8fa3bf", "握手"], [q, "#ff8c42", "排队"], [a, "#5ad1d0", "等首个事件"], [b, "#a78bfa", "思考到首字"], [c, "#ffb454", "生成"]].forEach(([w, color, name]) => {
+    [[hd, "#8fa3bf", "握手"], [q, "#ff8c42", "响应头后等待"], [a, "#5ad1d0", "请求至响应头"], [b, "#a78bfa", "首事件至首正文"], [c, "#ffb454", "首正文后至结束"]].forEach(([w, color, name]) => {
       if (w <= 0) return;
       s += `<rect x="${x}" y="${y}" width="${sx(w)}" height="${BAR}" fill="${color}"><title>${name} ${sec(w)}</title></rect>`;
       if (sx(w) > 46) s += `<text x="${x + sx(w) / 2}" y="${y + BAR / 2 + 5}" text-anchor="middle" style="font-size:11.5px;fill:#0a0d12;font-weight:700" pointer-events="none">${w >= 1 ? w.toFixed(1) : w.toFixed(2)}</text>`;
@@ -675,8 +730,8 @@ function chartSeg(rows) {
     s += `<text x="${L + sx(tot) + 10}" y="${y + BAR / 2 + 5}" style="font-weight:600">${sec(tot)}</text>`;
   });
   // 图例：两行三列，字号放大（握手是连接建立耗时，本就不计入请求耗时，仅供参考）
-  const legend = [[["#8fa3bf", "握手（不计入）"], ["#ff8c42", "排队"], ["#5ad1d0", "等首个事件"]],
-                  [["#a78bfa", "思考到首字"], ["#ffb454", "生成"], [null, ""]]];
+  const legend = [[["#ff8c42", "响应头后等待"], ["#5ad1d0", "请求至响应头"]],
+                  [["#a78bfa", "首事件至首正文"], ["#ffb454", "首正文后至结束"]]];
   legend.forEach((row, ri) => row.reduce((xs, [color, name]) => {
     if (!color) return xs;
     s += `<rect x="${xs}" y="${H - 44 + ri * 26}" width="13" height="13" fill="${color}" rx="2"/><text x="${xs + 20}" y="${H - 33 + ri * 26}" class="m" style="font-size:12.5px">${esc(name)}</text>`;
@@ -721,21 +776,21 @@ function envBox(env) {
   if (!env) { $("env").textContent = "测试结束保存后显示"; return; }
   const eps = (env.endpoints || []).map(e => `${e.name}（${e.api}，${e.base_url}）`).join("；") || "旧版结果，未记录";
   const sm = env.sampling, smTxt = sm ? ` · 采样 temperature=${sm.temperature}、输出上限 ${sm.max_tokens} tokens` : "";
-  $("env").innerHTML = `<div>${env.name ? "名称 <b>" + esc(env.name) + "</b> · " : ""}时间 ${esc((env.created || "").replace("T", " "))} · 脚本 v${esc(env.tool_version)} · 轮数 ${env.rounds ?? "-"} · 间隔 ${env.gap_s ?? "-"}s · 预热 ${env.warmup ? "是" : "否"} · 推理强度 ${esc(env.effort || "未指定")} · 随机种子 ${env.seed ?? "-"}${esc(smTxt)}</div>
+  $("env").innerHTML = `<div>${env.name ? "名称 <b>" + esc(env.name) + "</b> · " : ""}时间 ${esc((env.created || "").replace("T", " "))} · 脚本 v${esc(env.tool_version)} · 轮数 ${env.rounds ?? "-"} · 间隔 ${env.gap_s ?? "-"}s · 并发 ${env.concurrency ?? "未记录"} · 预热 ${env.warmup ? "是" : "否"} · 推理强度 ${esc(env.effort || "未指定")} · 随机种子 ${env.seed ?? "-"}${esc(smTxt)}</div>
     <div>接口 ${esc(eps)}</div><div>冷连接握手（不计入请求耗时）：${esc(JSON.stringify(env.handshake_s || {}))}</div>
     ${env.prompt ? `<div>自定义提示词：${esc(env.prompt.slice(0, 100))}${env.context_tokens ? "（背景约 " + env.context_tokens + " tokens）" : ""}</div>` : ""}
     ${(env.scenarios || []).some(x => /^needle/.test(x)) ? `<div class="mute" style="font-size:11.5px">大海捞针的背景长度是估算值（中文字符 ÷ 1.5），实际输入 tokens 看卡片/明细里的用量</div>` : ""}
-    ${sm ? `<div class="mute" style="font-size:11.5px;margin-top:2px">采样参数已固定（不同接口默认值往往不同，固定后才能公平比较）</div>` : ""}
+    ${sm ? `<div class="mute" style="font-size:11.5px;margin-top:2px">记录的是请求参数；服务端是否遵循及不同模型参数语义仍可能不同。</div>` : ""}
     <details data-k="env"><summary>完整快照（JSON）</summary><pre>${esc(JSON.stringify(env, null, 1))}</pre></details>`;
 }
 function detail(recs) {
-  $("detail").innerHTML = `<tr><th>#</th><th>时间</th><th>模型</th><th>题目</th><th>结果</th><th>HTTP</th><th>连接</th><th>排队</th><th>首个事件</th><th>首字</th><th>生成</th><th>总耗时</th><th>tokens/s</th><th>回答 / 错误</th></tr>` +
+  $("detail").innerHTML = `<tr><th>#</th><th>时间</th><th>模型</th><th>题目</th><th>结果</th><th>HTTP</th><th>连接</th><th>响应头后等待</th><th>首个事件</th><th>首字</th><th>生成</th><th>总耗时</th><th>tokens/s</th><th>回答 / 错误</th></tr>` +
     recs.map(r => `<tr><td>${r.seq || ""}</td><td>${esc((r.time || "").slice(11))}</td><td>${esc(r.label || r.model)}</td><td>${esc(r.task_name || "")}</td>
       <td class="${r.ok ? (r.pass === false ? "err" : "ok") : "err"}">${r.ok ? (r.pass === false ? "答错" : r.pass ? "答对" : "成功") : "失败"}</td><td>${esc(r.status ?? "-")}</td>
-      <td>${r.first_reused === false ? "新建" : "复用"}${r.conn_retry ? "<span class='tag warn' title='复用连接已被服务端关掉，已换新连接重发（不计入失败）'>重连</span>" : ""}</td>
+      <td>${r.first_reused === false ? "新建" : r.first_reused === true ? "复用" : "未知"}${r.conn_retry ? "<span class='tag warn' title='复用连接失败后换新连接重试；各次尝试见原始记录'>重连</span>" : ""}</td>
       <td>${r.queue_s == null ? "-" : sec(r.queue_s)}</td><td>${sec(r.first_event_s)}</td><td>${r.buffered ? "非流式" : sec(r.first_token_s)}</td><td>${r.gen_s == null ? "-" : sec(r.gen_s)}</td><td>${sec(r.total_s)}</td><td>${r.tps ?? r.tps_overall ?? "-"}</td>
       <td style="white-space:normal;min-width:240px">${r.error ? `<span class="err">${esc(r.error.slice(0, 200))}</span> ` : ""}${r.pass === false && r.grade_note ? `<span class="err">${esc(r.grade_note)}</span> ` : ""}${r.text ? `<details data-k="d${r.seq}"><summary>${esc(r.text.slice(0, 40))}…</summary><div style="white-space:pre-wrap">${esc(r.text)}</div></details>` : ""}</td></tr>`).join("");
-  $("detailNote").textContent = "排队 = 响应头到首个数据事件的等待（服务端/中转站内部排队，不是网络也不是模型）；生成 = 工具场景第二步单独耗时（与单次请求可比）；重连 = 复用连接已被服务端关掉，已换新连接重发。";
+  $("detailNote").textContent = "响应头后等待是客户端观测时间，无法单独归因；生成是工具场景第二步耗时。重连表示复用连接失败后重试，原始记录含尝试和端到端耗时。";
 }
 /* ---------------- 历史与趋势 ---------------- */
 const idTitle = id => id;
@@ -821,6 +876,14 @@ function fpCompareRows(runs, L) {
     const bi = list.find(x => x.i === cmpBase) || list[0];
     list.forEach(x => {
       if (x === bi) return;
+      const ea = runs[bi.i].d.env || {}, eb = runs[x.i].d.env || {};
+      const ka = (ea.condition_keys || {}).fingerprint, kb = (eb.condition_keys || {}).fingerprint;
+      const api = (env, label) => (env.endpoints || []).find(e => e.name === label.split("/")[0])?.api;
+      const aa = api(ea, bi.lb), ab = api(eb, x.lb);
+      if (!ka || !kb || ka !== kb || !aa || aa !== ab) {
+        out.push({key: k, i: x.i, bi: bi.i, v: "条件不同或未知（不作判断）", txt: `${x.lb} vs ${bi.lb}：指纹测试条件不同或未知，不比较`});
+        return;
+      }
       const noise = Math.max(bi.info.self_dist || 0, x.info.self_dist || 0) / Math.SQRT2;
       if (x.info.n_numbers < FP_MIN || bi.info.n_numbers < FP_MIN) {
         out.push({key: k, i: x.i, bi: bi.i, v: "样本不足（不作判断）", txt: `${x.lb} vs ${L(bi.i)} 的 ${bi.lb}：有效数字不足（${bi.info.n_numbers}/${x.info.n_numbers}，至少 ${FP_MIN}），不作判断`});
@@ -839,8 +902,8 @@ const METRICS = {
   ok: {name: "成功率", rate: true, thr: .02, get: r => r.n ? r.ok / r.n : null, fmt: pf, ci: r => r.ok_ci},
   pass: {name: "正确率", rate: true, thr: .02, get: r => r.pass_rate, fmt: pf, ci: r => r.pass_ci},
   tps: {name: "输出速度（tokens/秒）", thr: .03, get: r => r.tps ? r.tps.median : null, fmt: v => v.toFixed(1), vals: r => r.tps_vals, rng: r => r.tps},
-  queue: {name: "排队时间（中位数）", low: true, thr: .05, get: r => r.queue_median, fmt: sec, vals: r => r.queue_vals, rng: r => r.queue,
-    note: "响应头到首个数据事件的等待：服务端/中转站内部排队，不是网络也不是模型。直连 vs 中转时，这里最能看出中转自己加了多久"},
+  queue: {name: "响应头后首事件等待（中位数）", low: true, thr: .05, get: r => r.queue_median, fmt: sec, vals: r => r.queue_vals, rng: r => r.queue,
+    note: "客户端观测的响应头到首事件等待，无法单独归因"},
   gen: {name: "工具第二步生成（中位数）", low: true, thr: .05, get: r => r.gen ? r.gen.median : null, fmt: sec, vals: r => r.gen_vals, rng: r => r.gen,
     note: "拿到工具结果后生成答案的时间，与单次请求的总耗时可比（两步合计看“总耗时”）"},
 };
@@ -849,6 +912,9 @@ function cmpWarnings(ea, eb) {
   const hard = [], soft = [];
   if (!ea || !eb || ea.tool_version === "1.x" || eb.tool_version === "1.x") { soft.push("有一方是旧版结果，缺少环境信息，无法核对测试条件是否相同"); return {hard, soft}; }
   if ((ea.effort || "") !== (eb.effort || "")) hard.push(`推理强度不同（基准：${ea.effort || "未指定"}，这次：${eb.effort || "未指定"}）`);
+  const ca = ea.condition_keys || {}, cb = eb.condition_keys || {};
+  const common = Object.keys(ca).filter(k => k in cb);
+  if (!common.length || common.some(k => !ca[k] || ca[k] !== cb[k])) hard.push("场景条件不同或缺少可验证的条件指纹，无法判定可比性");
   const fa = ea.prompt_fingerprints || {}, fb = eb.prompt_fingerprints || {};
   const diff = Object.keys(fa).filter(k => k in fb && fa[k] !== fb[k]);
   if (diff.length) hard.push(`提示词或背景内容不同（${diff.slice(0, 4).join("、")}${diff.length > 4 ? "…" : ""}）`);
@@ -859,20 +925,17 @@ function cmpWarnings(ea, eb) {
   return {hard, soft};
 }
 // 把某个指标上“这一次”和“基准”比：变化多少、是否显著、更好还是更差
-function evalCell(m, base, row) {
+function evalCell(m, base, row, comparable = true) {
   const v = row ? m.get(row) : null;
   if (v == null) return {empty: true};
   if (row === base) return {v, base: true};
   const b = base ? m.get(base) : null;
   if (b == null || (!m.rate && b === 0)) return {v, unknown: true};
+  if (!comparable) return {v, unknown: true, reason: "条件不同或未知，不计算差值"};
   const c = m.rate ? v - b : (v - b) / b, small = Math.abs(c) < m.thr;
-  let sig = null, basis = "";
-  const va = m.vals && m.vals(base), vb = m.vals && m.vals(row);
-  if (va && vb && va.length >= 4 && vb.length >= 4) { const p = mwuP(va, vb); sig = p < 0.05; basis = "p=" + p.toFixed(3); }
-  else if (m.ci && m.ci(base) && m.ci(row)) { const x = m.ci(base), y = m.ci(row); sig = x[1] < y[0] || y[1] < x[0]; basis = sig ? "区间不重叠" : "区间重叠"; }
-  else if (m.rng && m.rng(base) && m.rng(row)) { const x = m.rng(base), y = m.rng(row); sig = x.max < y.min || y.max < x.min; basis = sig ? "范围不重叠，样本少" : "范围重叠，样本少"; }
+  const sig = null, basis = "仅描述样本，未作显著性或等效检验";
   const better = m.low ? c < 0 : c > 0, pct = Math.abs(c * 100).toFixed(0);
-  const kind = small ? "same" : sig === false ? "same" : sig === null ? "unk" : better ? "better" : "worse";
+  const kind = "unk";
   const word = small ? (m.rate ? `相差 ${pct} 个百分点` : `相差 ${pct}%`)  // 变化很小就别说“快/慢”，更不会出现“慢 0%”
     : m.rate ? `${c > 0 ? "高" : "低"} ${pct} 个百分点` : m.low ? `${c < 0 ? "快" : "慢"} ${pct}%` : `${c > 0 ? "高" : "低"} ${pct}%`;
   return {v, c, sig, basis, kind, word, small, arrow: small ? "≈" : c > 0 ? "▲" : "▼"};
@@ -881,7 +944,7 @@ function cellHtml(m, e, tag) {
   if (e.empty) return '<td class="mute">—</td>';
   const val = m.fmt(e.v) + (tag ? `<div class="t">${esc(tag)}</div>` : "");
   if (e.base) return `<td class="cmpcell base"><div class="v">${val}</div><div class="t"><b>基准</b></div></td>`;
-  if (e.unknown) return `<td class="cmpcell"><div class="v">${val}</div><div class="t">基准没有这项数据</div></td>`;
+  if (e.unknown) return `<td class="cmpcell"><div class="v">${val}</div><div class="t">${esc(e.reason || "基准没有这项数据")}</div></td>`;
   const label = e.kind === "same" && e.small ? "基本持平" : KIND_TXT[e.kind];
   return `<td class="cmpcell ${e.kind}"><div class="v">${val}</div><div class="d">${e.arrow} ${e.word}</div><div class="t">${label}${e.basis ? " · " + esc(e.basis) : ""}</div></td>`;
 }
@@ -897,6 +960,13 @@ function groupRows(runs, sc) {
 }
 let cmpRuns = [], cmpBase = 0, cmpMetric = "total";
 const baseIdx = g => g.rows[cmpBase] ? cmpBase : g.rows.findIndex(Boolean);  // 全局基准在这个场景/模型里没有数据时，临时用第一个有数据的测试当基准
+function conditionsMatch(sc, a, b, ra, rb) {
+  const ea = cmpRuns[a]?.d.env || {}, eb = cmpRuns[b]?.d.env || {};
+  const ka = (ea.condition_keys || {})[sc], kb = (eb.condition_keys || {})[sc];
+  const api = (env, row) => (env.endpoints || []).find(e => e.name === (row?.label || "").split("/")[0])?.api;
+  const aa = api(ea, ra), ab = api(eb, rb);
+  return !!ka && !!kb && ka === kb && !!aa && aa === ab;
+}
 async function compareRuns() {
   if (cmpSel.length < 2) return;
   location.hash = "cmp=" + cmpSel.map(encodeURIComponent).join(",");
@@ -922,13 +992,12 @@ function renderCompare() {
   // 2.5 模型指纹对账（跨次测试，直连 vs 中转看这里）
   const fpRows = fpCompareRows(runs, L);
   if (fpRows.length) html += `<div class="panel"><h3 style="margin-top:0">模型指纹对账（跨次测试）</h3>` + fpRows.map(r => `<div>${esc(r.txt)} ${fpTag(r.v)}</div>`).join("") +
-    `<div class="mute" style="font-size:11.5px;margin-top:4px">数值分布 Hellinger 距离，判定线由各次自身的抽样噪声决定。指纹是启发式证据，不是身份认证；“不一致”只说明输出分布差异超出抽样噪声，也可能与上游路由、服务降级或方法局限有关。</div></div>`;
+    `<div class="mute" style="font-size:11.5px;margin-top:4px">数值分布 Hellinger 距离与启发式阈值未经真实模型误报率校准；不论距离大小，均不能证明模型身份。</div></div>`;
   // 3. 怎么看
   html += `<div class="panel legend"><b>怎么看这张对比</b><ul>
-    <li><b>基准</b>是拿来比的那一次（现在是 <b>${L(cmpBase)}</b>），它那一格写“基准”；其余每格显示数值、比基准变化了多少、是更好还是更差。</li>
-    <li><b>越小越好</b>：总耗时、首字时间 —— ▼ 变小 = 更快 = <span class="fast">更好</span>；<b>越大越好</b>：成功率、正确率、输出速度 —— ▲ 变大 = <span class="fast">更好</span>。</li>
-    <li>格子颜色：<span class="fast">绿 = 更好</span>，<span class="slow">红 = 更差</span>，灰 = 差异不明显（可能只是随机波动，别当成真的变好或变差）。</li>
-    <li>“显著”的判断：每边至少 4 个样本时做统计检验（p&lt;0.05 才算显著）；成功率/正确率看 95% 区间是否重叠；样本更少时只看范围是否重叠。变化小于 3%（比例类 2 个百分点）直接算“基本持平”。</li></ul></div>`;
+    <li><b>基准</b>是拿来比的那一次（现在是 <b>${L(cmpBase)}</b>），其余每格仅显示可比较样本的数值和差值。</li>
+    <li>总耗时、首字时间通常越小越好；成功率、正确率、输出速度通常越大越好，但输出长度、质量和 token 口径会影响解释。</li>
+    <li>仅展示样本差值，不进行显著性或等效推断；条件不同或未知时不计算差值。未检出差异不代表表现相当。</li></ul></div>`;
   // 4. 结论
   html += verdictHtml(groups, hardNotes.length > 0, fpRows);
   // 5. 指标切换 + 表格
@@ -942,7 +1011,7 @@ function renderCompare() {
     const gs = groups.filter(g => g.sc === sc && g.rows.some(r => r && m.get(r) != null));
     if (!gs.length) { skipped.push(scName(sc)); continue; }
     html += `<div class="panel"><h3 style="margin-top:0">${esc(scName(sc))}</h3><div style="overflow:auto"><table class="cmptbl nw"><tr><th>模型</th>${runs.map((r, i) => `<th>${L(i)}${i === cmpBase ? "（基准）" : ""}<div class="mute" style="font-weight:400">${esc(r.name || "")}</div></th>`).join("")}</tr>` +
-      gs.map(g => { const bi = baseIdx(g); return `<tr><td>${esc(g.key)}${bi !== cmpBase ? `<div class="mute" style="font-size:11.5px">${L(cmpBase)} 没有这项，临时以 ${L(bi)} 为基准</div>` : ""}</td>${g.rows.map(r => cellHtml(m, evalCell(m, g.rows[bi], r), g.single && r ? r.label : "")).join("")}</tr>`; }).join("") + "</table></div></div>";
+      gs.map(g => { const bi = baseIdx(g); return `<tr><td>${esc(g.key)}${bi !== cmpBase ? `<div class="mute" style="font-size:11.5px">${L(cmpBase)} 没有这项，临时以 ${L(bi)} 为基准</div>` : ""}</td>${g.rows.map((r, i) => cellHtml(m, evalCell(m, g.rows[bi], r, conditionsMatch(sc, bi, i, g.rows[bi], r)), g.single && r ? r.label : "")).join("")}</tr>`; }).join("") + "</table></div></div>";
   }
   if (skipped.length) html += `<div class="infobox">【${skipped.map(esc).join("、")}】没有“${m.name}”这项数据，所以上面没有它的表；点上面的其他指标可以看到。</div>`;
   if (!usable.length) html += `<div class="panel"><div class="empty-note"><b>这几次测试没有可以逐项比较的数据</b>
@@ -963,7 +1032,7 @@ function verdictHtml(groups, hasHard, fpRows) {
     const segs = [];
     for (const k of ["total", "ft", "tps", "ok", "pass"]) {
       const m = METRICS[k]; if (m.get(br) == null) continue;
-      const ev = g.rows.map((r, i) => i === bi ? null : {i, e: evalCell(m, br, r)}).filter(x => x && !x.e.empty && !x.e.unknown);
+      const ev = g.rows.map((r, i) => i === bi ? null : {i, e: evalCell(m, br, r, conditionsMatch(g.sc, bi, i, br, r))}).filter(x => x && !x.e.empty && !x.e.unknown);
       if (!ev.length) continue;
       ev.forEach(x => { counts[x.e.kind]++; items.push(Object.assign({g, k, m, bi}, x)); });
       if (ev.every(x => x.e.kind === "same")) { if (k === "total" || k === "pass") segs.push(`${m.name}：各次与基准差异不明显`); continue; }
@@ -971,18 +1040,18 @@ function verdictHtml(groups, hasHard, fpRows) {
     }
     for (const k of ["queue", "gen"]) {  // 口径说明型指标：单独列出，不进“显著更好/更差”计数（排队差异通常是链路问题，不是模型差异）
       const m = METRICS[k]; if (m.get(br) == null) continue;
-      const ev = g.rows.map((r, i) => i === bi ? null : {i, e: evalCell(m, br, r)}).filter(x => x && !x.e.empty && !x.e.unknown);
+      const ev = g.rows.map((r, i) => i === bi ? null : {i, e: evalCell(m, br, r, conditionsMatch(g.sc, bi, i, br, r))}).filter(x => x && !x.e.empty && !x.e.unknown);
       if (!ev.length) continue;
       if (ev.some(x => x.e.kind !== "same")) segs.push(`${m.name}：` + ev.map(x => `${L(x.i)} ${x.e.word}`).join("；") + "（口径：" + m.note + "）");
     }
     if (segs.length) lines.push(`【${scName(g.sc)}】${g.single ? "" : g.key}${bi !== base ? `（以 ${L(bi)} 为基准）` : ""}${g.single && bi === base ? "" : "："}${segs.join("　|　")}`);
   }
   const total = counts.better + counts.worse + counts.same + counts.unk;
-  if (!total) return `<div class="verdict"><div class="head">结论</div>这几次测试没有可以逐项比较的共同模型/场景。</div>`;
+  if (!total) return `<div class="verdict"><div class="head">结论</div>没有可比较的指标：场景、条件或协议可能不同或未记录。</div>`;
   const best = items.filter(x => x.e.kind === "better").sort((a, b) => Math.abs(b.e.c) - Math.abs(a.e.c))[0], worst = items.filter(x => x.e.kind === "worse").sort((a, b) => Math.abs(b.e.c) - Math.abs(a.e.c))[0];
   const desc = x => `${L(x.i)}（${runs[x.i].name || runs[x.i].id}）${x.g.single ? "" : "的 " + x.g.key} 在【${scName(x.g.sc)}】的${x.m.name}，比基准 ${L(x.bi)} ${x.e.word}（${KIND_TXT[x.e.kind]}${x.e.basis ? "，" + x.e.basis : ""}）`;
-  let head = `相对基准 ${L(base)}，共比较 ${total} 项：<b class="fast">显著更好 ${counts.better} 项</b>，<b class="slow">显著更差 ${counts.worse} 项</b>，差异不明显 ${counts.same} 项${counts.unk ? "，无法判断 " + counts.unk + " 项（样本太少）" : ""}。`;
-  let verdict = counts.better && !counts.worse ? "整体：没有变差的项，有明确变好的项。" : counts.worse && !counts.better ? "整体：没有变好的项，有明确变差的项。" : counts.better && counts.worse ? "整体：有变好也有变差，要看你更在意哪个指标。" : "整体：各次之间没有统计上可靠的差别，可以认为表现相当。";
+  let head = `相对基准 ${L(base)}，展示 ${total} 项样本差值。`;
+  let verdict = "这些差值仅作描述，不能证明显著差异或表现相当。";
   const out = [`<div class="head">结论</div>${hasHard ? "⚠ 部分测试条件不同，以下结论仅供参考。\n" : ""}${head}\n${verdict}`];
   if (best) out.push(`最大改善：${esc(desc(best))}`);
   if (worst) out.push(`最大退步：${esc(desc(worst))}`);
@@ -1013,7 +1082,7 @@ function renderMerge() {
   let html = `<div class="panel"><div class="row" style="margin-top:0">
     <b style="font-size:13px">合并 ${d.runs_meta.length} 次测试 · ${d.total_requests} 个请求</b>
     <span class="mute" style="font-size:11.5px">${d.runs_meta.map(r => esc(r.id)).join("、")}</span></div>
-    <div class="mute" style="font-size:12px;margin-top:6px;line-height:1.8">把条件相同的请求合在一起后重算。样本量越大，“差异不明显”越可信、“显著”越可靠。
+    <div class="mute" style="font-size:12px;margin-top:6px;line-height:1.8">仅合并条件和接口身份已记录且一致的请求；重复样本可能相关，合并不保证结论可靠。
     看“每组样本数”就知道合并后每行用了多少次请求。</div></div>`;
 
   // 条件不同被拆开的提醒
@@ -1066,22 +1135,30 @@ $("run").onclick = start; $("stop").onclick = () => api("/api/stop", {});
 $("mfilter").oninput = renderModels; $("trendSc").onchange = () => { trendConds(); trend(); }; $("trendCond").onchange = trend; $("cmpBtn").onclick = compareRuns; $("mergeBtn").onclick = mergeRuns;
 $("cmpAll").onclick = () => { cmpSel = historyRuns.slice(0, MAX_CMP).map(r => r.id).reverse(); syncCmp(); };  // 历史是新→旧，反过来让最早的一次当基准
 $("cmpClear").onclick = () => { cmpSel = []; syncCmp(); };
-["rounds", "gap"].forEach(i => $(i).oninput = () => { updateEst(); savePrm(); });
-["prompt", "context", "timeout", "warmup", "effort"].forEach(i => $(i).onchange = () => { savePrm(); if (i === "warmup") updateEst(); });
+["rounds", "gap", "concurrency", "seed"].forEach(i => $(i).oninput = () => { updateEst(); savePrm(); });
+["prompt", "context", "timeout", "warmup", "effort", "connectionMode"].forEach(i => $(i).onchange = () => { savePrm(); if (i === "warmup") updateEst(); });
 $("useName").onchange = () => { nameUi(); savePrm(); }; $("runName").oninput = () => { nameUi(); savePrm(); };
+$("lanToggle").onchange = () => lanToggle($("lanToggle").checked);
+$("lanCopy").onclick = async () => {
+  const url = $("lanUrl").textContent;
+  try { await navigator.clipboard.writeText(url); $("lanMsg").className = "msg ok"; $("lanMsg").textContent = "地址已复制"; }
+  catch (e) { $("lanMsg").className = "msg err"; $("lanMsg").textContent = "复制失败，请手动选中地址复制"; }
+};
 
 (async () => {
   try { cfg = await api("/api/config"); $("ver").textContent = "v" + cfg.version; } catch (e) {}
   if (cfg.defaults) ["rounds", "timeout", "gap"].forEach(k => { $(k).value = cfg.defaults[k]; });  // 默认值和上限来自 config.json；本机保存过的参数优先
   if (cfg.max_rounds) $("rounds").max = cfg.max_rounds;
   if (cfg.max_timeout) $("timeout").max = cfg.max_timeout;
-  const prm = store.get("prm", {}); for (const k of ["prompt", "context", "rounds", "timeout", "gap"]) if (prm[k] != null) $(k).value = prm[k]; if (prm.warmup === false) $("warmup").checked = false; $("effort").value = prm.effort || "";
+  const prm = store.get("prm", {}); for (const k of ["prompt", "context", "rounds", "timeout", "gap", "concurrency", "seed"]) if (prm[k] != null) $(k).value = prm[k]; if (prm.warmup === false) $("warmup").checked = false; $("effort").value = prm.effort || "";
+  if (["reuse", "cold"].includes(prm.connectionMode)) $("connectionMode").value = prm.connectionMode;
   $("useName").checked = !!prm.useName; $("runName").value = prm.runName || ""; nameUi();
   selected = new Set(store.get("sel", [])); chosenSc = new Set(store.get("sc", ["speed"]));
   renderScen();
   try { await loadEndpoints(); } catch (e) { $("eps").textContent = "读取接口失败：" + e.message; }
   updateEst();
   await loadHistory().catch(() => {});
+  lanLoad().catch(() => {});
   const j = await api("/api/job");
   if (j.state === "running" || j.state === "starting") { setRunning(true); polling = setInterval(poll, 800); }
   const m = location.hash.match(/run=(.+)/);

@@ -16,6 +16,7 @@ import threading
 import time
 import unittest
 import urllib.parse
+from unittest import mock
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # ModelBench 目录
 sys.path.insert(0, HERE)
@@ -99,13 +100,13 @@ class Stats(unittest.TestCase):
         def rows(a, b):
             return core.summarize([self._rec("A", total=t) for t in a] + [self._rec("B", total=t) for t in b])
         c1 = core.conclusion(rows([1.0, 1.1, 1.0, 1.05, 1.02], [2.0, 2.1, 2.05, 2.2, 2.0]))
-        self.assertIn("最快 A", c1)
-        self.assertIn("显著快于第二名 B", c1)
+        self.assertIn("成功请求耗时中位数最低 A", c1)
+        self.assertIn("不能推断显著性或等效", c1)
         c2 = core.conclusion(rows([1, 2, 3, 4, 5], [1.5, 2.5, 3.5, 4.5, 5.5]))
-        self.assertIn("差异不明显", c2)
+        self.assertIn("不能推断显著性或等效", c2)
         self.assertNotIn("显著快于", c2)
-        c3 = core.conclusion(rows([1, 2], [1.5, 2.5]))  # 样本太少：用范围重叠判断
-        self.assertIn("范围重叠", c3)
+        c3 = core.conclusion(rows([1, 2], [1.5, 2.5]))
+        self.assertNotIn("显著快于", c3)
 
     def test_reasoning_and_buffered_fields(self):
         r = self._rec("a", total=10)
@@ -116,19 +117,18 @@ class Stats(unittest.TestCase):
         self.assertEqual(row["think_share"], 0.25)  # (首字 5 - 首个事件 2.5) / 总 10
 
     def test_pass_ci_is_per_question_not_per_request(self):
-        """10 道题测 10 轮 = 100 个请求，但只有 10 道题：区间必须按 10 个单位算，不能按 100 个独立样本算。"""
+        """固定题目重复测量不计算未经验证的 Wilson 区间。"""
         recs = [self._rec("m", sc="quiz", passed=True, task=f"q{i}") for i in range(10) for _ in range(10)]
         row = core.summarize(recs)[0]
-        self.assertEqual((row["pass_n"], row["graded"], row["pass_ci_basis"], row["pass_units"]), (100, 100, "题目", 10))
-        self.assertAlmostEqual(row["pass_ci"][0], core.wilson(10, 10)[0], places=3)  # ≈0.722，而不是 100 个样本的 ≈0.963
-        self.assertLess(row["pass_ci"][0], 0.8)
+        self.assertEqual((row["pass_n"], row["graded"], row["pass_ci_basis"], row["pass_units"]), (100, 100, None, 10))
+        self.assertIsNone(row["pass_ci"])
         half = [self._rec("m", sc="quiz", passed=(i < 5), task=f"q{i}") for i in range(10) for _ in range(4)]  # 5 题全对、5 题全错
-        self.assertAlmostEqual(core.summarize(half)[0]["pass_ci"][0], core.wilson(5, 10)[0], places=3)
+        self.assertIsNone(core.summarize(half)[0]["pass_ci"])
 
     def test_pass_ci_single_task_uses_requests(self):
         row = core.summarize([self._rec("m", sc="tool", passed=(i < 4), task="tool") for i in range(5)])[0]
-        self.assertEqual((row["pass_ci_basis"], row["pass_units"]), ("请求", 5))
-        self.assertEqual(row["pass_ci"], core.wilson(4, 5))
+        self.assertEqual((row["pass_ci_basis"], row["pass_units"]), (None, 1))
+        self.assertIsNone(row["pass_ci"])
 
     def test_low_ok_sample_flag(self):
         """请求够多但成功的太少：耗时只统计成功请求，所以要单独提示。"""
@@ -148,10 +148,10 @@ class Stats(unittest.TestCase):
         recs = ([self._rec("A", total=1.0) for _ in range(9)] + [self._rec("A", ok=False)] +
                 [self._rec("B", total=3.0) for _ in range(9)] + [self._rec("B", ok=False)])
         c = core.conclusion(core.summarize(recs))
-        self.assertIn("最快 A", c)
+        self.assertIn("成功请求耗时中位数最低 A", c)
         self.assertIn("只统计成功请求", c)
         low = core.conclusion(core.summarize([self._rec("A", total=1.0) for _ in range(3)] + [self._rec("A", ok=False) for _ in range(7)]))
-        self.assertNotIn("最快", low)  # 成功率 30%，不参与比速度
+        self.assertNotIn("成功请求耗时中位数", low)
 
     def test_failed_requests_do_not_enter_timing(self):
         row = core.summarize([self._rec("a", total=1), self._rec("a", ok=False, total=60)])[0]
@@ -206,6 +206,10 @@ class NonStreamAndRetry(unittest.TestCase):
             srv.server_close()
         self.assertTrue(all(r["ok"] for r in rs), "keep-alive 竞态不该记为失败：" + str([r["error"] for r in rs]))
         self.assertTrue(any(r.get("conn_retry") for r in rs[1:]), "复用连接失败应标 conn_retry 并换连接重发")
+        retry = next(r for r in rs if r.get("conn_retry"))
+        self.assertEqual(len(retry["attempts"]), 2)
+        self.assertTrue(retry["attempts"][0]["error"])
+        self.assertGreaterEqual(retry["wall_total_s"], retry["total_s"])
         self.assertGreater(hits["n"], len(rs) - 1, "重发应多打一次请求")
 
     def test_queue_time_separated_from_first_token(self):
@@ -274,6 +278,8 @@ class NonStreamAndRetry(unittest.TestCase):
         row = core.summarize([r])[0]
         self.assertAlmostEqual(row["gen"]["median"], r["gen_s"], places=3)
         self.assertEqual(row["gen_vals"], [r["gen_s"]])
+        self.assertGreaterEqual(r["wall_total_s"], r["total_s"] - 0.002)
+        self.assertEqual(r["first_event_s"], next(e["t"] for e in r["events"] if e["step"] == 1))
 class Graders(unittest.TestCase):
     def test_every_standard_answer_passes_and_wrong_fails(self):
         for q in core.QUIZ:
@@ -296,7 +302,7 @@ class Graders(unittest.TestCase):
         self.assertTrue(core.check_answer(core.QUIZ[0]["chk"], "贰佰伍拾贰万元整。"))
         self.assertTrue(core.check_answer(core.QUIZ[5]["chk"], "结果是：391"))
         self.assertTrue(core.check_answer(core.QUIZ[9]["chk"], "A！"))
-        self.assertTrue(core.check_answer(core.QUIZ[3]["chk"], "苹果，香蕉，橙子") or True)  # 中文逗号：宽松化剥不掉，仍算格式不符
+        self.assertFalse(core.check_answer(core.QUIZ[3]["chk"], "苹果，香蕉，橙子", True))
         # strict 题不吃宽松化
         self.assertFalse(core.check_answer(core.QUIZ[2]["chk"], "{\"name\": \"张三\", \"age\": 30}。", True))
 
@@ -414,7 +420,7 @@ class Api(unittest.TestCase):
     def test_05_end_to_end_run_saves_folder(self):
         day = dt.date.today().isoformat()
         body = {"selection": [{"endpoint": Api.eid, "models": ["quiz-good", "tool-ok"]}], "scenarios": ["quiz", "tool"], "rounds": 2,
-                "timeout": 30, "gap": 0, "warmup": True, "effort": "medium"}
+                "timeout": 30, "gap": 0, "warmup": True, "effort": "medium", "seed": 123}
         self.assertEqual(call("POST", "/api/run", body)[0], 200)
         self.assertEqual(call("POST", "/api/run", body)[0], 409)  # 一次只跑一个
         self.assertEqual(call("POST", "/api/selftest", {})[0], 409)  # 测试中不允许自检
@@ -493,11 +499,12 @@ class Fairness(unittest.TestCase):
             self.assertEqual(sum(1 for r in recs if r["round"] == rd), 6)
 
     def test_trend_condition_key(self):
-        base = {"effort": "", "prompt": "甲", "context_tokens": 0, "prompt_fingerprints": {"speed": "aaa", "quiz": "q"}}
+        base = {"method_version": "3", "sampling": {"temperature": 0, "max_tokens": 4096}, "timeout_s": 20, "gap_s": 0, "warmup": False,
+                "effort": "", "prompt": "甲", "context_tokens": 0, "scenario_fingerprints": {"speed": "aaa", "quiz": "q"}}
         k = lambda env, sc: store._cond(env, sc)[0]  # noqa: E731
-        self.assertNotEqual(k(base, "speed"), k(dict(base, prompt_fingerprints={"speed": "bbb"}), "speed"))  # 提示词/背景变了 → 不同线
+        self.assertNotEqual(k(base, "speed"), k(dict(base, scenario_fingerprints={"speed": "bbb"}), "speed"))
         self.assertNotEqual(k(base, "speed"), k(dict(base, effort="high"), "speed"))
-        self.assertEqual(k(base, "quiz"), k(dict(base, prompt="乙", prompt_fingerprints={"speed": "zzz", "quiz": "q"}), "quiz"))  # 题库不受自定义提示词影响
+        self.assertEqual(k(base, "quiz"), k(dict(base, prompt="乙", scenario_fingerprints={"speed": "zzz", "quiz": "q"}), "quiz"))
 
     def test_gen_scenario_has_speed(self):
         eps = selftest.fake_endpoint(FAKE[1])
@@ -666,16 +673,16 @@ class Fingerprint(unittest.TestCase):
         d = [0] * core.FP_BINS
         d[0] = 100
         self.assertGreater(core.hellinger(c, d), 0.5)
-        self.assertEqual(core.fp_verdict(0.05, 0.1)[0], "指纹一致")
+        self.assertEqual(core.fp_verdict(0.05, 0.1)[0], "数值分布接近（不证明身份）")
         self.assertEqual(core.fp_verdict(0.35, 0.1)[0], "差异不明显（不作判断）")
-        self.assertEqual(core.fp_verdict(0.55, 0.1)[0], "指纹不一致")
+        self.assertEqual(core.fp_verdict(0.55, 0.1)[0], "数值分布差异较大（不证明身份）")
         self.assertEqual(core.fp_verdict(0.15, 0)[1], core.FP_ABS_FLOOR)  # 噪声为 0 时判定线不低于下限
 
     def test_fp_analysis_verdicts(self):
         same = core.fp_analysis(self._recs("a", self._draw(21, 1000)) + self._recs("b", self._draw(22, 1000)))
-        self.assertEqual(same["pairs"][0]["verdict"], "指纹一致")
+        self.assertEqual(same["pairs"][0]["verdict"], "数值分布接近（不证明身份）")
         diff = core.fp_analysis(self._recs("a", self._draw(31, 240)) + self._recs("b", self._draw(32, 240, 1, 20)))
-        self.assertEqual(diff["pairs"][0]["verdict"], "指纹不一致")
+        self.assertEqual(diff["pairs"][0]["verdict"], "数值分布差异较大（不证明身份）")
         few = core.fp_analysis(self._recs("a", self._draw(41, 240)) + self._recs("b", self._draw(42, 50)))
         self.assertEqual(few["pairs"][0]["verdict"], "样本不足（不作判断）")
         one = core.fp_analysis(self._recs("a", self._draw(51, 240)))
@@ -702,7 +709,7 @@ class Fingerprint(unittest.TestCase):
             srv.shutdown()
             srv.server_close()
         fp = core.fp_analysis(recs)
-        self.assertEqual(fp["pairs"][0]["verdict"], "指纹不一致")
+        self.assertEqual(fp["pairs"][0]["verdict"], "数值分布差异较大（不证明身份）")
         self.assertTrue(all(v["n_numbers"] == 240 for v in fp["labels"].values()))
 
 
@@ -823,25 +830,19 @@ class FairnessAndValidity(unittest.TestCase):
                                 "usage": {"input_tokens": 10, "output_tokens": 50}, "pass": None, "task": "t", "task_name": "t", "text": "x"}
                                for t in b])
         txt = core.conclusion(rows)
-        self.assertIn("差异不明显", txt)
-        self.assertIn("检验力低", txt, "样本少且差距不大时应说明可能是检验力不足")
-        self.assertIn("合并对比", txt, "应指引用户如何提高检验力")
+        self.assertIn("不能推断显著性或等效", txt)
+        self.assertNotIn("显著快于", txt)
 
 
 class MergeRuns(unittest.TestCase):
     """跨次测试合并：同条件样本翻倍、不同条件绝不混算、旧版结果不参与。"""
 
     def _run(self, effort="", scenario="quiz", prompt="", rounds=1):
-        srv, base = selftest.start_fake()
-        try:
-            ep = selftest.fake_endpoint(base)
-            store._save({"schema_version": 1, "endpoints": [dict(ep, id="e1", name="fake", models=["quiz-good"], api_detected="responses", models_checked_at=None)]})
-            return store.execute({"selection": [{"endpoint": "e1", "models": ["quiz-good"]}], "scenarios": [scenario], "prompt": prompt,
-                                  "rounds": rounds, "timeout": 20, "context": 0, "gap": 0, "warmup": False, "name": "", "effort": effort},
-                                 lambda u: None, threading.Event())["id"]
-        finally:
-            srv.shutdown()
-            srv.server_close()
+        ep = selftest.fake_endpoint(FAKE[1])
+        store._save({"schema_version": 1, "endpoints": [dict(ep, id="e1", name="fake", models=["quiz-good"], api_detected="responses", models_checked_at=None)]})
+        return store.execute({"selection": [{"endpoint": "e1", "models": ["quiz-good"]}], "scenarios": [scenario], "prompt": prompt,
+                              "rounds": rounds, "timeout": 20, "context": 0, "gap": 0, "warmup": False, "name": "", "effort": effort},
+                             lambda u: None, threading.Event())["id"]
 
     def test_same_condition_merges_and_doubles_samples(self):
         a, b = self._run(rounds=2), self._run(rounds=2)
@@ -852,7 +853,7 @@ class MergeRuns(unittest.TestCase):
         self.assertEqual(sorted(row["merged_runs"]), sorted([a, b]))
         self.assertEqual(m["warnings"], [])
         # 同条件合并后可用样本翻倍，检验力提示应随之消失或更弱
-        self.assertIn("correct" if False else "最快", m["conclusion"])
+        self.assertIn("成功请求耗时中位数", m["conclusion"])
 
     def test_different_conditions_are_not_merged(self):
         a, b = self._run(effort=""), self._run(effort="high")
@@ -885,3 +886,333 @@ class MergeRuns(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertNotEqual(runs[0]["env"].get("sampling"), None)
         self.assertTrue(all(g["cond"] for g in m["groups"]), "合并后的组必须带条件标记")
+
+
+class ValidityRegression(unittest.TestCase):
+    def _env(self, tasks):
+        plan = {"endpoints": {"e": selftest.fake_endpoint(FAKE[1])}, "models": [("e", "m")],
+                "tasks": tasks, "rounds": 1, "timeout": 20, "gap": 0, "warmup": False, "effort": "", "seed": 1}
+        return core.make_env(plan, {}, {"created": "2026-01-01", "prompt": "", "context": 0})
+
+    def test_scenario_manifest_tracks_tasks_and_grading(self):
+        for scenario in ("quiz", "fingerprint", "tool"):
+            tasks = core.build_tasks([scenario])
+            original = self._env(tasks)
+            changed = [dict(t) for t in tasks]
+            changed[0]["prompt"] += "changed"
+            self.assertNotEqual(core.cond_of(original, scenario), core.cond_of(self._env(changed), scenario))
+            if scenario == "quiz":
+                changed = [dict(t) for t in tasks]
+                changed[0]["chk"] = ("re", "changed")
+                self.assertNotEqual(core.cond_of(original, scenario), core.cond_of(self._env(changed), scenario))
+        old = dict(original)
+        old.pop("scenario_fingerprints")
+        self.assertIsNone(core.cond_of(old, "tool"))
+
+    def test_unknown_conditions_and_changed_service_do_not_merge(self):
+        env = self._env(core.build_tasks(["speed"]))
+        rec = Stats()._rec("fake/m")
+        old = dict(env)
+        old.pop("scenario_fingerprints")
+        runs = [{"id": "a", "env": old, "records": [rec]}, {"id": "b", "env": old, "records": [rec]}]
+        self.assertEqual(len(core.merge_analysis(runs)["rows"]), 2)
+        other = dict(env, endpoints=[dict(env["endpoints"][0], base_url="http://other.invalid")])
+        runs = [{"id": "a", "env": env, "records": [rec]}, {"id": "b", "env": other, "records": [rec]}]
+        merged = core.merge_analysis(runs)
+        self.assertEqual(len(merged["rows"]), 2)
+        self.assertIn("未作排名", merged["conclusion"])
+
+    def test_conclusion_never_ranks_across_conditions(self):
+        recs = [dict(Stats()._rec("same/m", total=1), cond="a") for _ in range(5)]
+        recs += [dict(Stats()._rec("same/m", total=5), cond="b") for _ in range(5)]
+        text = core.conclusion(core.summarize(recs))
+        self.assertNotIn("第二名", text)
+        self.assertNotIn("显著", text)
+
+    def test_specific_grader_boundaries(self):
+        q = {x["id"]: x for x in core.QUIZ}
+        for text in ("桌子,椅子,电脑", "苹果,香蕉,苹果", "苹果，香蕉，橙子"):
+            self.assertFalse(core.check_answer(q["q04"]["chk"], text, True))
+        self.assertTrue(core.check_answer(q["q04"]["chk"], "橙子,苹果,香蕉", True))
+        for text in ("答案是：A！", "A\n", " A"):
+            self.assertFalse(core.check_answer(q["q10"]["chk"], text, True))
+        for value in (["MET"], "MET", "MET错误名称", 123):
+            self.assertFalse(core._tool_args_ok({"name": "lookup_price", "arguments": json.dumps({"item": value})}))
+        self.assertTrue(core._tool_args_ok({"name": "lookup_price", "arguments": json.dumps({"item": "MET混合滤料包"})}))
+
+    def test_tool_steps_use_recorded_sampling_parameters(self):
+        for api, key in (("chat", "max_tokens"), ("responses", "max_output_tokens")):
+            ep, pool = selftest.fake_endpoint(FAKE[1], api), core.Pool()
+            try:
+                with mock.patch.object(core, "stream_request", wraps=core.stream_request) as req:
+                    result = core.run_task(pool, ep, "tool-ok", core.build_tasks(["tool"])[0], 20)
+                self.assertTrue(result["pass"])
+                self.assertEqual(req.call_count, 2)
+                for call, step in zip(req.call_args_list, result["steps"]):
+                    body = call.args[2]
+                    self.assertEqual((body["temperature"], body[key]), (0, core.MAX_TOKENS))
+                    self.assertEqual(step["request_config"][key], body[key])
+            finally:
+                pool.close()
+
+    def test_incomplete_responses_fail_in_both_protocols_and_formats(self):
+        class Truncated(selftest.Fake):
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n))
+                chat = self.path.endswith("/chat/completions")
+                streamed = body.get("model") == "streamed"
+                if not streamed:
+                    data = ({"choices": [{"message": {"content": "partial"}, "finish_reason": "length"}]} if chat
+                            else {"status": "incomplete", "output_text": "partial"})
+                    return self._json(200, data)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                events = ([{"choices": [{"delta": {"content": "partial"}, "finish_reason": "length"}]}] if chat
+                          else [{"type": "response.output_text.delta", "delta": "partial"},
+                                {"type": "response.incomplete", "response": {"status": "incomplete"}}])
+                for event in events:
+                    self._chunk("data: " + json.dumps(event) + "\n\n")
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+        srv = server.ThreadingHTTPServer(("127.0.0.1", 0), Truncated)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            for api in ("chat", "responses"):
+                pool = core.Pool()
+                try:
+                    ep = selftest.fake_endpoint(f"http://127.0.0.1:{srv.server_address[1]}", api)
+                    for model in ("streamed", "json"):
+                        r = core.stream_request(pool, ep, core.make_body(api, model, "x"), 20)
+                        self.assertEqual(r["response_status"], "incomplete")
+                        self.assertFalse(r["ok"])
+                        self.assertEqual(r["text"], "partial")
+                finally:
+                    pool.close()
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_buffered_samples_excluded_from_streaming_summary(self):
+        normal = dict(Stats()._rec("m", total=2), tps=10, buffered=False)
+        buffered = dict(Stats()._rec("m", total=20), tps=100, buffered=True)
+        row = core.summarize([normal, buffered])[0]
+        self.assertEqual(row["first_token_vals"], [1])
+        self.assertEqual(row["tps_vals"], [10])
+
+
+class ExpandedEvaluation(unittest.TestCase):
+    def test_extended_answers_and_near_misses(self):
+        self.assertEqual(len(core.QUIZ_EXTENDED), 8)
+        for q in core.QUIZ_EXTENDED:
+            self.assertTrue(core.check_answer(q["chk"], q["ans"], q.get("strict", False)), q["id"])
+            self.assertFalse(core.check_answer(q["chk"], "错误", q.get("strict", False)), q["id"])
+        self.assertFalse(core.check_answer(("json", {"price": 1, "unit": "元/包"}), '{"price":true,"unit":"元/包"}', True))
+        self.assertFalse(core.check_answer(("json", {"price": 1, "unit": "元/包"}), '{"price":2,"price":1,"unit":"元/包"}', True))
+
+    def test_randomized_tool_is_paired_and_reproducible(self):
+        task = core.build_tasks(["tool"])[0]
+        a = core.materialize_task(task, 123, 1)
+        b = core.materialize_task(task, 123, 1)
+        c = core.materialize_task(task, 123, 2)
+        self.assertEqual(a, b)
+        self.assertNotEqual(a["tool_result"], c["tool_result"])
+        for api in ("chat", "responses"):
+            pool = core.Pool()
+            try:
+                r = core.run_task(pool, selftest.fake_endpoint(FAKE[1], api), "tool-ok", a, 20)
+                self.assertTrue(r["pass"])
+                self.assertEqual(r["tool_result"], a["tool_result"])
+            finally:
+                pool.close()
+
+    def test_context_matrix_cases(self):
+        tasks = core.build_tasks(["needle_matrix"])
+        self.assertEqual(len(tasks), 12)
+        self.assertEqual({t["depth"] for t in tasks}, {10, 50, 90})
+        self.assertEqual({t["length"] for t in tasks}, {10000, 30000})
+        for task in tasks:
+            x = core.materialize_task(task, 19, 1)
+            self.assertEqual(x, core.materialize_task(task, 19, 1))
+            case = x["case"]
+            self.assertIsNone(x.get("system"))
+            self.assertIn(case["distractor"], x["prompt"])
+            answer = case["target"] if case["present"] else "未知"
+            self.assertTrue(core.check_answer(x["chk"], answer, True))
+            self.assertFalse(core.check_answer(x["chk"], case["distractor"], True))
+            self.assertFalse(core.check_answer(x["chk"], answer + "。", True))
+            if case["present"]:
+                self.assertIn(case["target"], x["prompt"])
+
+    def test_random_seed_and_conditions(self):
+        task = core.build_tasks(["tool"])
+        plan = {"endpoints": {"e": selftest.fake_endpoint(FAKE[1])}, "models": [("e", "m")], "tasks": task,
+                "rounds": 2, "timeout": 20, "gap": 0, "warmup": False, "effort": "", "seed": 1, "concurrency": 1, "connection_mode": "reuse"}
+        meta = {"created": "2026-01-01", "prompt": "", "context": 0}
+        a = core.make_env(plan, {}, meta)
+        b = core.make_env(dict(plan, seed=2), {}, meta)
+        self.assertNotEqual(core.cond_of(a, "tool"), core.cond_of(b, "tool"))
+        self.assertNotEqual(core.cond_of(a, "tool"), core.cond_of(core.make_env(dict(plan, concurrency=2), {}, meta), "tool"))
+        self.assertNotEqual(core.cond_of(a, "tool"), core.cond_of(core.make_env(dict(plan, connection_mode="cold"), {}, meta), "tool"))
+
+    def test_slo_includes_failures_and_missing_timing_is_unknown(self):
+        def rec(ok, passed, elapsed):
+            return dict(Stats()._rec("m", ok=ok, passed=passed), wall_total_s=elapsed)
+        row = core.summarize([rec(True, True, 2), rec(True, False, 2), rec(False, False, 2), rec(True, True, 11)])[0]
+        self.assertEqual((row["slo_n"], row["slo_rate"], row["slo_observed"]), (1, .25, 4))
+        self.assertIsNone(core.summarize([Stats()._rec("m")])[0]["slo_rate"])
+
+    def test_concurrency_and_cold_connections(self):
+        state, lock = {"active": 0, "peak": 0}, threading.Lock()
+        class ConcurrentFake(selftest.Fake):
+            def do_POST(self):
+                with lock:
+                    state["active"] += 1
+                    state["peak"] = max(state["peak"], state["active"])
+                try:
+                    time.sleep(.15)
+                    super().do_POST()
+                finally:
+                    with lock:
+                        state["active"] -= 1
+        srv = server.ThreadingHTTPServer(("127.0.0.1", 0), ConcurrentFake)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            ep = selftest.fake_endpoint(f"http://127.0.0.1:{srv.server_address[1]}")
+            plan = {"endpoints": {"e": ep}, "models": [("e", "quiz-good")], "tasks": core.build_tasks(["quiz"])[:4],
+                    "rounds": 1, "timeout": 20, "gap": 0, "warmup": False, "seed": 2, "concurrency": 2, "connection_mode": "cold"}
+            recs, _ = core.run_plan(plan, lambda _: None, threading.Event())
+            self.assertEqual(len(recs), 4)
+            self.assertTrue(all(r["ok"] and r["first_reused"] is False for r in recs))
+            self.assertEqual([r["seq"] for r in recs], [1, 2, 3, 4])
+            self.assertEqual(state["peak"], 2)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_concurrent_stop_and_seed_pairing(self):
+        stop = threading.Event()
+        ep = selftest.fake_endpoint(FAKE[1])
+        plan = {"endpoints": {"e": ep}, "models": [("e", "tool-ok"), ("e", "tool-ok")], "tasks": core.build_tasks(["tool"]),
+                "rounds": 1, "timeout": 20, "gap": 0, "warmup": False, "seed": 42, "concurrency": 2}
+        recs, _ = core.run_plan(plan, lambda _: None, stop)
+        self.assertEqual(len(recs), 2)
+        self.assertTrue(all(r["pass"] for r in recs))
+        self.assertEqual(recs[0]["tool_result"], recs[1]["tool_result"])
+        plan.update(tasks=core.build_tasks(["quiz"]), models=[("e", "delay-0.5")], rounds=3)
+        recs, _ = core.run_plan(plan, lambda u: stop.set() if u.get("done", 0) >= 1 else None, stop)
+        self.assertLessEqual(len(recs), 2)
+        self.assertTrue(stop.is_set())
+
+    def test_needle_matrix_end_to_end(self):
+        plan = {"endpoints": {"e": selftest.fake_endpoint(FAKE[1])}, "models": [("e", "needle-good")],
+                "tasks": core.build_tasks(["needle_matrix"]), "rounds": 1, "timeout": 20, "gap": 0,
+                "warmup": False, "seed": 12, "concurrency": 2}
+        recs, _ = core.run_plan(plan, lambda _: None, threading.Event())
+        self.assertEqual(len(recs), 12)
+        self.assertTrue(all(r["pass"] for r in recs))
+        self.assertEqual(sum(r["case"]["present"] for r in recs), 6)
+
+    def test_validation_includes_tool_two_steps_and_parameters(self):
+        ep = store.upsert_endpoint({"name": "cap-test", "base_url": FAKE[1], "api_key": selftest.KEY, "api": "responses", "models": ["tool-ok"]})
+        body = {"selection": [{"endpoint": ep["id"], "models": ["tool-ok"]}], "scenarios": ["tool"], "rounds": 2, "timeout": 20, "gap": 0, "warmup": True}
+        with mock.patch.object(server, "MAX_REQUESTS", 4):
+            with self.assertRaises(ValueError):
+                server.validate(body)
+        for key, value in (("concurrency", 0), ("concurrency", 5), ("connection_mode", "other"), ("seed", -1)):
+            with self.assertRaises(ValueError):
+                server.validate(dict(body, **{key: value}))
+
+    def test_zero_cached_tokens_and_returned_model_are_preserved(self):
+        rec = core._new_rec(selftest.fake_endpoint(FAKE[1]), "requested", "chat")
+        acc = {"text": [], "reasoning": [], "items": [], "calls": {}}
+        core._consume(rec, {"model": "reported", "system_fingerprint": "fp-test", "usage": {"prompt_cache_hit_tokens": 0}, "choices": []}, "chat", acc, .1)
+        self.assertEqual(rec["usage"]["cached_tokens"], 0)
+        self.assertEqual((rec["returned_model"], rec["system_fingerprint"]), ("reported", "fp-test"))
+        rec.update(ok=True, total_s=1, first_token_s=.5, first_event_s=.1, scenario="speed", task="s")
+        row = core.summarize([rec])[0]
+        self.assertEqual((row["cached_known"], row["cached_hit_n"]), (1, 0))
+        self.assertEqual(row["returned_models"], ["reported"])
+
+
+class LanAccess(unittest.TestCase):
+    """局域网访问：默认关闭、令牌校验、只绑非回环地址、开关状态机。"""
+
+    def tearDown(self):
+        server.lan_stop()
+
+    def test_lan_ips_returns_list_without_loopback(self):
+        ips = server.lan_ips()
+        self.assertIsInstance(ips, list)
+        for ip in ips:
+            self.assertFalse(ip.startswith("127."), "不应把回环地址当成局域网地址：" + ip)
+            self.assertNotEqual(ip, "0.0.0.0")
+
+    def test_is_lan_addr(self):
+        self.assertFalse(server.is_lan_addr("127.0.0.1"))
+        self.assertFalse(server.is_lan_addr(None))
+        self.assertTrue(server.is_lan_addr("192.168.1.5"))
+
+    def test_default_off_and_info_shape(self):
+        info = server.lan_info()
+        self.assertFalse(info["enabled"])
+        self.assertIsNone(info["url"])
+        for key in ("enabled", "host", "port", "token", "url", "candidates"):
+            self.assertIn(key, info)
+
+    def test_token_required_for_lan_requests(self):
+        """带令牌的 ?k= 与 cookie 都能过；缺失或错误则拒。"""
+        token = "testtoken123"
+        old = dict(server.LAN)
+        try:
+            server.LAN.update(srv=object(), host="192.168.1.5", port=8888, token=token)
+            self.assertTrue(server.lan_info()["enabled"])
+            handler_cls = server.Handler
+            h = handler_cls.__new__(handler_cls)
+            # 1) 无令牌
+            h.path, h.headers = "/api/config", {}
+            self.assertFalse(h._token_ok())
+            # 2) ?k= 正确
+            h.path = "/api/config?k=" + token
+            self.assertTrue(h._token_ok())
+            # 3) cookie 正确
+            h.path = "/api/config"
+            h.headers = {"Cookie": "a=1; mbtoken=" + token + "; b=2"}
+            self.assertTrue(h._token_ok())
+            # 4) cookie 错误
+            h.headers = {"Cookie": "mbtoken=wrong"}
+            self.assertFalse(h._token_ok())
+        finally:
+            server.LAN.update(old)
+
+    def test_token_never_published_from_lan_request(self):
+        """局域网设备请求 /api/network 时不应拿到令牌（避免设备间串联）。"""
+        old = dict(server.LAN)
+        try:
+            server.LAN.update(srv=object(), host="192.168.1.5", port=8888, token="secret-token")
+            info = server.lan_info()
+            self.assertEqual(info["token"], "secret-token")  # 本机视角能看到
+            self.assertIsNotNone(info["url"])
+        finally:
+            server.LAN.update(old)
+
+    def test_api_network_toggle_roundtrip(self):
+        """接口层：GET 初始关闭；POST 非法参数报错；POST 关闭是幂等的。"""
+        status, body = call("GET", "/api/network")
+        self.assertEqual(status, 200)
+        self.assertIn("enabled", body)
+        for bad in ({}, {"enable": "yes"}, {"enable": 1}):
+            st, b = call("POST", "/api/network", bad)
+            self.assertEqual(st, 400, "非法参数应报 400：" + str(bad))
+        st, b = call("POST", "/api/network", {"enable": False})
+        self.assertEqual(st, 200)
+        self.assertFalse(b["enabled"])
+
+    def test_denied_page_mentions_token(self):
+        html = server.lan_denied_html().decode("utf-8")
+        self.assertIn("需要访问令牌", html)
+        self.assertIn("?k=", html)
