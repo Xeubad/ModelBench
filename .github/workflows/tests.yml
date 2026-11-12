@@ -9,7 +9,8 @@ on:
 jobs:
   test:
     name: 单元测试 + 仪器自检 (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    # Python 3.9 的预编译包不提供 Ubuntu 26.04，固定到受支持的镜像。
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
