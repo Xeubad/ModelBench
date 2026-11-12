@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""模型测试引擎（网页和命令行共用）：直连任意 OpenAI 兼容接口，流式、不重试，记录状态码、分段耗时、用量、回答全文和全部流事件。
+"""模型测试引擎（网页和命令行共用）：支持 OpenAI 兼容接口及 Anthropic Messages，记录请求和流事件。
 
 做了什么：
-- 接口类型两种：responses（POST {base}/v1/responses）和 chat（POST {base}/v1/chat/completions）；地址没写版本号时自动补 /v1。
+- 接口类型：responses、chat、anthropic；地址没写版本号时自动补 /v1。
 - 公平性：每个接口复用一条连接（TCP/TLS 握手单独记录，不算进请求耗时）；每个模型先发一次不计入的预热请求；
   每一轮把“全部模型 × 全部题目”随机打乱顺序再发（种子保存在结果里，可复现）；同一接口两次请求之间留间隔，避免 429。
 - 计时拆开：连接、响应头、首个事件、首个思考、首个正文字、总耗时、输出速度（tokens/秒）。
 - 场景：speed（自定义提示词）、quiz（10 道有标准答案的题，自动判分）、tool（两步工具调用，含把 reasoning 项回放）、
-  needle10k / needle30k（大海捞针）。判分只用精确匹配、正则、JSON 比对，不让模型自评。
+  needle10k / needle30k（大海捞针）、ModelTrace 候选和短问题分布。判分不让模型自评。
 - 统计：中位数、p95、最小、最大；样本 < 5 标“样本不足”；固定题集仅报告描述性正确率和一致性。
 不改任何 OpenClaw 配置，不经过网关，不走终端代理，不保存密钥。
 时间度量一律用单调时钟 time.perf_counter()（不受系统校时影响），只有记录“几点几分”用墙上时钟。
@@ -27,9 +27,11 @@ import threading
 import time
 import urllib.parse
 
-VERSION = "2.8.0"
+from . import behavior, modeltrace
+
+VERSION = "2.9.0"
 SCHEMA_VERSION = 3
-METHOD_VERSION = "4"  # 变更请求、判分或测量口径时更新，旧结果不自动合并
+METHOD_VERSION = "5"  # 变更请求、判分或测量口径时更新，旧结果不自动合并
 CONTEXT_CHOICES = (0, 10000, 30000)  # 自定义提示词前的背景文字长度（约 tokens）；0 = 不加
 LOW_SAMPLE = 5
 P95_MIN_N = 20  # 样本少于这个数，p95 基本等于最大值，不展示
@@ -54,6 +56,8 @@ SCENARIOS = {
     "needle30k": "大海捞针（约 3 万 tokens）",
     "needle_matrix": "长上下文矩阵（12题，费用较高）",
     "fingerprint": "模型指纹（数值分布对账）",
+    "modeltrace": "ModelTrace 模型候选（每轮 3 次长数字挑战）",
+    "behavior": "短问题行为分布（每轮 4 次）",
 }
 _FILLER_UNIT = "长汀县汀江流域河田段农业面源污染治理项目采用MET混合滤料包与土建安装相结合的方式，招标文件要求投标人提供CMA检测报告并加盖公章。"  # 约 41 tokens
 NEEDLE = "【内部备忘】本次测试的暗号是：青竹-7392，请牢记。"
@@ -120,7 +124,7 @@ def endpoint_parts(base_url):
     if u.scheme not in ("http", "https") or not u.hostname:
         raise ValueError("地址必须以 http:// 或 https:// 开头")
     path = u.path.rstrip("/")
-    for tail in ("/chat/completions", "/responses", "/models"):
+    for tail in ("/chat/completions", "/responses", "/models", "/messages"):
         if path.endswith(tail):
             path = path[: -len(tail)]
     if not re.search(r"/v\d+\w*$", path):
@@ -181,19 +185,29 @@ def label_of(ep, model):
     return f"{ep['name']}/{model}"
 
 
+def _auth_headers(ep):
+    if ep.get("api") == "anthropic":
+        return {"x-api-key": ep["api_key"], "anthropic-version": "2023-06-01"}
+    return {"Authorization": "Bearer " + ep["api_key"]}
+
+
 def fetch_models(ep, timeout=20):
     """GET {base}/models，返回模型 id 列表（OpenAI 兼容格式）。失败抛 RuntimeError。"""
     _, _, _, prefix = endpoint_parts(ep["base_url"])
-    conn, _ = _new_conn(ep, timeout)
-    try:
-        conn.request("GET", prefix + "/models", headers={"Authorization": "Bearer " + ep["api_key"], "Accept": "application/json",
-                                                          "User-Agent": "modelbench/" + VERSION})
-        resp = conn.getresponse()
-        body = resp.read().decode("utf-8", "replace")
-    finally:
-        conn.close()
-    if resp.status != 200:
-        raise RuntimeError(f"HTTP {resp.status} {clip(body, 160)}")
+    styles = ("responses", "anthropic") if ep.get("api") == "auto" else (ep.get("api"),)
+    for index, style in enumerate(styles):
+        conn, _ = _new_conn(ep, timeout)
+        try:
+            conn.request("GET", prefix + "/models", headers={**_auth_headers(dict(ep, api=style)), "Accept": "application/json",
+                                                              "User-Agent": "modelbench/" + VERSION})
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8", "replace")
+        finally:
+            conn.close()
+        if resp.status == 200:
+            break
+        if index + 1 == len(styles) or resp.status not in (400, 401, 403, 404, 405):
+            raise RuntimeError(f"HTTP {resp.status} {clip(body, 160)}")
     data = json.loads(body)
     items = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), list) else (
         data.get("models") if isinstance(data, dict) else data)
@@ -208,6 +222,8 @@ def with_effort(body, api, effort):
     if effort:
         if api == "chat":
             body["reasoning_effort"] = effort
+        elif api == "anthropic":
+            body["output_config"] = {"effort": effort}
         else:
             body["reasoning"] = {"effort": effort}
     return body
@@ -221,6 +237,11 @@ def make_body(api, model, prompt, system=None, effort=""):
     if api == "chat":
         msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
         return with_effort({"model": model, "messages": msgs, "stream": True, "stream_options": {"include_usage": True}, **SAMPLING_CHAT}, api, effort)
+    if api == "anthropic":
+        body = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": True, **SAMPLING_CHAT}
+        if system:
+            body["system"] = system
+        return with_effort(body, api, effort)
     return with_effort({"model": model, "stream": True,
                         "input": ([{"role": "developer", "content": system}, {"role": "user", "content": prompt}] if system else prompt),
                         **SAMPLING_RESPONSES}, api, effort)
@@ -240,6 +261,96 @@ def _chat_cached_tokens(usage):
     return (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
 
 
+def _anthropic_usage(existing, data):
+    """Messages 的 input_tokens 不包含缓存读取和创建量；output_tokens 增量覆盖。"""
+    if not isinstance(data, dict):
+        return existing
+    usage = dict(existing or {})
+    if "input_tokens" in data:
+        usage["input_tokens"] = (data["input_tokens"] + (data.get("cache_read_input_tokens") or 0)
+                                 + (data.get("cache_creation_input_tokens") or 0))
+        usage["cached_tokens"] = data.get("cache_read_input_tokens")
+        usage["cache_creation_input_tokens"] = data.get("cache_creation_input_tokens")
+    if "output_tokens" in data:
+        usage["output_tokens"] = data["output_tokens"]
+    details = data.get("output_tokens_details") or {}
+    if "thinking_tokens" in details:
+        usage["reasoning_tokens"] = details["thinking_tokens"]
+    return usage
+
+
+def _consume_anthropic(rec, ev, acc, now):
+    kind = ev.get("type")
+    blocks = acc.setdefault("anthropic_blocks", {})
+    opened = acc.setdefault("anthropic_open", set())
+    index = ev.get("index", 0)
+    if kind == "message_start":
+        if acc.get("anthropic_started"):
+            rec["error"] = "重复的 message_start 事件"
+        acc["anthropic_started"] = True
+        message = ev.get("message") or {}
+        rec["returned_model"] = message.get("model")
+        rec["usage"] = _anthropic_usage(rec["usage"], message.get("usage"))
+    elif kind == "content_block_start":
+        if not acc.get("anthropic_started") or index in blocks:
+            rec["error"] = "无效的 content_block_start 事件"
+            return
+        block = dict(ev.get("content_block") or {})
+        blocks[index] = block
+        opened.add(index)
+        if block.get("type") == "text" and block.get("text"):
+            rec["first_token_s"] = rec["first_token_s"] if rec["first_token_s"] is not None else now
+            acc["text"].append(block["text"])
+        elif block.get("type") == "tool_use":
+            acc["calls"][index] = {"id": block.get("id", ""), "name": block.get("name", ""), "arguments": ""}
+    elif kind == "content_block_delta":
+        if index not in opened:
+            rec["error"] = "内容增量缺少对应的内容块"
+            return
+        delta = ev.get("delta") or {}
+        block = blocks[index]
+        delta_type = delta.get("type")
+        if delta_type == "text_delta":
+            text = delta.get("text") or ""
+            if text:
+                rec["first_token_s"] = rec["first_token_s"] if rec["first_token_s"] is not None else now
+                acc["text"].append(text)
+                block["text"] = (block.get("text") or "") + text
+        elif delta_type == "thinking_delta":
+            rec["first_think_s"] = rec["first_think_s"] if rec["first_think_s"] is not None else now
+            block["thinking"] = (block.get("thinking") or "") + (delta.get("thinking") or "")
+        elif delta_type == "signature_delta":
+            block["signature"] = (block.get("signature") or "") + (delta.get("signature") or "")
+        elif delta_type == "input_json_delta" and index in acc["calls"]:
+            acc["calls"][index]["arguments"] += delta.get("partial_json") or ""
+    elif kind == "content_block_stop":
+        if index not in opened:
+            rec["error"] = "内容块结束事件无对应的开始事件"
+            return
+        opened.remove(index)
+        if index in acc["calls"]:
+            call, block = acc["calls"][index], blocks[index]
+            try:
+                args = json.loads(call["arguments"]) if call["arguments"] else block.get("input", {})
+                if not isinstance(args, dict):
+                    raise ValueError("tool input must be an object")
+                block["input"] = args
+                call["arguments"] = json.dumps(args, ensure_ascii=False)
+            except (ValueError, TypeError):
+                rec["error"] = "工具参数不是合法 JSON 对象"
+    elif kind == "message_delta":
+        acc["anthropic_reason"] = (ev.get("delta") or {}).get("stop_reason")
+        rec["usage"] = _anthropic_usage(rec["usage"], ev.get("usage"))
+    elif kind == "message_stop":
+        if not acc.get("anthropic_started") or opened:
+            rec["error"] = "消息结束时仍有未完成的内容块"
+        reason = acc.get("anthropic_reason")
+        rec["stop_reason"] = reason
+        rec["response_status"] = "completed" if reason in ("end_turn", "stop_sequence", "tool_use") else "incomplete"
+    elif kind == "error":
+        rec["error"] = clip(json.dumps(ev.get("error") or ev, ensure_ascii=False))
+
+
 def _consume(rec, ev, api, acc, now):
     if rec["first_event_s"] is None:
         rec["first_event_s"] = now
@@ -252,6 +363,9 @@ def _consume(rec, ev, api, acc, now):
         if rec["first_token_s"] is None:
             rec["first_token_s"] = now
 
+    if api == "anthropic":
+        _consume_anthropic(rec, ev, acc, now)
+        return
     if api == "chat":
         rec["returned_model"] = ev.get("model") or rec.get("returned_model")
         rec["system_fingerprint"] = ev.get("system_fingerprint") or rec.get("system_fingerprint")
@@ -309,6 +423,17 @@ def _consume_json_body(rec, acc, api, payload):
     标 non_stream=True（首字不是真首字，与 buffered 同口径）。没有这一步，这类中转站会被误判成“流在完成事件之前断开”。"""
     rec["returned_model"] = payload.get("model")
     rec["system_fingerprint"] = payload.get("system_fingerprint")
+    if api == "anthropic":
+        acc["items"] = payload.get("content") or []
+        rec["text"] = "".join(it.get("text", "") for it in acc["items"] if it.get("type") == "text")
+        for i, item in enumerate(acc["items"]):
+            if item.get("type") == "tool_use":
+                acc["calls"][i] = {"id": item.get("id", ""), "name": item.get("name", ""),
+                                   "arguments": json.dumps(item.get("input"), ensure_ascii=False)}
+        rec["usage"] = _anthropic_usage(None, payload.get("usage"))
+        rec["stop_reason"] = payload.get("stop_reason")
+        rec["response_status"] = "completed" if rec["stop_reason"] in ("end_turn", "stop_sequence", "tool_use") else "incomplete"
+        return
     if api == "chat":
         choice = (payload.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
@@ -338,11 +463,11 @@ def stream_request(pool, ep, body, timeout):
     """发一次请求；复用连接失败时最多重试一次，并记录每次尝试和端到端时间。"""
     api = ep["api"]
     rec = _new_rec(ep, body["model"], api)
-    rec["request_config"] = {k: body[k] for k in ("model", "stream", "temperature", "max_tokens", "max_output_tokens", "reasoning", "reasoning_effort", "stream_options") if k in body}
+    rec["request_config"] = {k: body[k] for k in ("model", "stream", "temperature", "max_tokens", "max_output_tokens", "reasoning", "reasoning_effort", "output_config", "stream_options") if k in body}
     acc = {"text": [], "reasoning": [], "items": [], "calls": {}}
-    path = endpoint_parts(ep["base_url"])[3] + ("/chat/completions" if api == "chat" else "/responses")
+    path = endpoint_parts(ep["base_url"])[3] + {"chat": "/chat/completions", "responses": "/responses", "anthropic": "/messages"}[api]
     data = json.dumps(body).encode()
-    headers = {"Authorization": "Bearer " + ep["api_key"], "Content-Type": "application/json", "Accept": "text/event-stream",
+    headers = {**_auth_headers(ep), "Content-Type": "application/json", "Accept": "text/event-stream",
                "User-Agent": "modelbench/" + VERSION}
     conn_errors = (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError,
                    http.client.ResponseNotReady, http.client.CannotSendRequest, http.client.BadStatusLine)
@@ -410,7 +535,14 @@ def stream_request(pool, ep, body, timeout):
                 now = round(time.perf_counter() - t0, 3)
                 rec["events"].append({"t": now, "event": ev})
                 _consume(rec, ev, api, acc, now)
+            if resp.length not in (None, 0):
+                raise http.client.IncompleteRead(b"", resp.length)
+            # readline() 对 Content-Length 恰好读完时不会关闭 HTTPResponse；
+            # 不关闭会让下一个 getresponse() 报 ResponseNotReady，并可能重复发送请求。
+            resp.close()
             rec["text"] = "".join(acc["text"])
+            if api == "anthropic":
+                acc["items"] = [acc.get("anthropic_blocks", {})[i] for i in sorted(acc.get("anthropic_blocks", {}))]
             calls = ([{"id": it.get("call_id"), "name": it.get("name"), "arguments": it.get("arguments")}
                       for it in acc["items"] if isinstance(it, dict) and it.get("type") == "function_call"]
                      if api == "responses" else [acc["calls"][k] for k in sorted(acc["calls"])])
@@ -488,6 +620,11 @@ def build_tasks(scenarios, prompt=DEFAULT_PROMPT, context=0):
                                       "length": length, "depth": depth, "present": present})
         elif sc == "fingerprint":
             tasks += [{"id": f"fp{i + 1}", "scenario": "fingerprint", "kind": "plain", "name": f"数值指纹 {i + 1}", "prompt": p} for i, p in enumerate(FP_PROMPTS)]
+        elif sc == "modeltrace":
+            tasks += [dict(item, scenario=sc, kind="modeltrace", name=f"长数字挑战 {i + 1}")
+                      for i, item in enumerate(modeltrace.challenges(0))]
+        elif sc == "behavior":
+            tasks += behavior.tasks()
     return tasks
 
 
@@ -496,7 +633,10 @@ def materialize_task(task, seed, round_no):
     digest = hashlib.sha256(f"{seed}:{round_no}:{task['id']}".encode()).digest()
     rng = random.Random(int.from_bytes(digest[:8], "big"))
     result = dict(task)
-    if task["kind"] == "tool":
+    if task["kind"] == "modeltrace":
+        index = int(task["id"][2:]) - 1
+        result.update(modeltrace.challenges(seed, round_no)[index])
+    elif task["kind"] == "tool":
         result["tool_result"] = dict(TOOL_RESULT, price=rng.randrange(1000, 99999) / 100)
     elif task["kind"] == "needle_matrix":
         n = max(1, round(task["length"] / 44))
@@ -599,7 +739,12 @@ def run_tool(pool, ep, model, task, timeout, effort=""):
     """验证工具调用以及对本次工具返回结果的使用。"""
     logical_start = time.perf_counter()
     api = ep["api"]
-    tool = ({"type": "function", "function": TOOL_DEF} if api == "chat" else dict(TOOL_DEF, type="function"))
+    if api == "chat":
+        tool = {"type": "function", "function": TOOL_DEF}
+    elif api == "anthropic":
+        tool = {"name": TOOL_DEF["name"], "description": TOOL_DEF["description"], "input_schema": TOOL_DEF["parameters"]}
+    else:
+        tool = dict(TOOL_DEF, type="function")
     user = {"role": "user", "content": task["prompt"]}
     body1 = make_body(api, model, task["prompt"], effort=effort)
     if api == "responses":
@@ -626,6 +771,10 @@ def run_tool(pool, ep, model, task, timeout, effort=""):
             asst["reasoning_content"] = rp["reasoning"]
         body2 = make_body(api, model, task["prompt"], effort=effort)
         body2.update(messages=[user, asst, {"role": "tool", "tool_call_id": call["id"], "content": result}], tools=[tool])
+    elif api == "anthropic":
+        body2 = make_body(api, model, task["prompt"], effort=effort)
+        body2.update(tools=[tool], messages=[user, {"role": "assistant", "content": rp["items"]},
+                                             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call["id"], "content": result}]}])
     else:
         body2 = make_body(api, model, task["prompt"], effort=effort)
         body2.update(tools=[tool], input=[user] + rp["items"] + [{"type": "function_call_output", "call_id": call["id"], "output": result}])
@@ -655,8 +804,15 @@ def run_tool(pool, ep, model, task, timeout, effort=""):
 def run_task(pool, ep, model, task, timeout, effort=""):
     if task["kind"] == "tool":
         return run_tool(pool, ep, model, task, timeout, effort)
-    rec = stream_request(pool, ep, make_body(ep["api"], model, task["prompt"], task.get("system"), effort), timeout)
+    body = make_body(ep["api"], model, task["prompt"], task.get("system"), effort)
+    if task["kind"] in ("modeltrace", "behavior"):
+        # 分布测试使用服务商默认 temperature，不强行设置为 0。
+        body.pop("temperature", None)
+    rec = stream_request(pool, ep, body, timeout)
     _grade(rec, task)
+    if task["kind"] == "modeltrace":
+        rec["expected_count"] = task["expected_count"]
+        rec["probe_prompt"] = task["prompt"]
     return rec
 
 
@@ -752,15 +908,24 @@ def cond_of(env, scenario):
     if not fp or any(k not in env or env[k] is None for k in required) or not isinstance(sampling, dict) or any(k not in sampling for k in ("temperature", "max_tokens")):
         return None
     data = {k: env[k] for k in required}
-    if env.get("method_version") == "4":
+    if env.get("method_version") in ("4", "5"):
         if "concurrency" not in env or "connection_mode" not in env:
             return None
         data["concurrency"] = env["concurrency"]
         data["connection_mode"] = env["connection_mode"]
-        if scenario in ("tool", "needle_matrix"):
+        if scenario in ("tool", "needle_matrix", "modeltrace"):
             if env.get("seed") is None:
                 return None
             data["seed"] = env["seed"]
+    if scenario == "behavior":
+        if not env.get("behavior"):
+            return None
+        data["behavior"] = env["behavior"]
+    if scenario == "modeltrace":
+        identity = env.get("modeltrace") or {}
+        if not identity.get("bank_sha256"):
+            return None
+        data["modeltrace"] = identity
     data.update(scenario=scenario, fingerprint=fp)
     return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
@@ -1013,7 +1178,9 @@ def conclusion(rows, fp=None):
         if duplicate_labels:
             parts.append(f"【{SCENARIOS.get(sc, sc)}】同名目标的接口身份不同或未知，未作排名")
             continue
-        full = sorted((r for r in rs if r["total"] and r["ok"] / r["n"] >= 0.8), key=lambda r: r["total"]["median"]) if sc != "fingerprint" else []  # 成功率 ≥80% 才参与比速度；耗时只统计成功请求；指纹场景不比速度
+        if sc in ("modeltrace", "behavior"):
+            seg.append(f"请求成功 {sum(r['ok'] for r in rs)}/{sum(r['n'] for r in rs)}；分布结果见下方，不用于身份认证")
+        full = sorted((r for r in rs if r["total"] and r["ok"] / r["n"] >= 0.8), key=lambda r: r["total"]["median"]) if sc not in ("fingerprint", "modeltrace", "behavior") else []  # 指纹挑战的输出长度不同，不排名速度
         if full:
             f = full[0]
             prefix = "成功请求耗时中位数最低" if len(full) > 1 else "成功请求耗时中位数"
@@ -1203,6 +1370,13 @@ def make_env(plan, extra, meta):
             "endpoints": list(eps.values()), "models": [label_of(plan["endpoints"][e], m) for e, m in plan["models"]],
             "handshake_s": extra.get("handshake_s", {}), "warmup_results": extra.get("warmup", {}),
             "note": "请求耗时不含连接建立；另记录含重连的端到端耗时。采样参数已固定（temperature=0、输出上限 " + str(MAX_TOKENS) + " tokens），不保证上游执行一致；重复请求可能相关，成功率区间仅供参考，正确率不计算 Wilson 区间。"}
+    if "modeltrace" in scen:
+        env["modeltrace"] = {"bank_sha256": modeltrace.BANK_SHA256, "upstream_commit": modeltrace.UPSTREAM_COMMIT,
+                             "temperature": "provider_default", "challenges_per_round": 3}
+        env["note"] += " ModelTrace 场景单独使用服务商默认 temperature。"
+    if "behavior" in scen:
+        env["behavior"] = {"version": 1, "temperature": "provider_default", "probes_per_round": len(behavior.PROBES)}
+        env["note"] += " 短问题行为分布场景使用服务商默认 temperature。"
     env["condition_keys"] = {sc: cond_of(env, sc) for sc in scen}
     return env
 
@@ -1226,6 +1400,38 @@ def write_report(path, result):
         for r in rows:
             if r.get("slo_rate") is not None:
                 f.write(f"- {r['label']} [{r['scenario']}]：{r['slo_n']}/{r['n']}；重连任务 {r['retry_n']}\n")
+        behavior_results = result.get("behavior")
+        if behavior_results:
+            f.write("\n## 短问题行为分布\n\n分布距离仅供描述，没有校准后的身份判定线。\n\n")
+            for label, probes in behavior_results["profiles"].items():
+                f.write(f"- {label}：\n")
+                for probe in probes.values():
+                    counts = "、".join(f"{clip(answer, 100)} × {count}" for answer, count in probe["counts"].items()) or "无有效回答"
+                    f.write(f"  - {probe['name']}：有效 {probe['valid']}/{probe['planned']}；{counts}\n")
+            for pair in behavior_results["pairs"]:
+                distance = "样本不足" if pair["mean_jsd"] is None else f"平均 JSD {pair['mean_jsd']:.3f}"
+                f.write(f"- {pair['a']} / {pair['b']}：{distance}\n")
+                for probe in pair["probes"]:
+                    value = "样本不足" if probe["jsd"] is None else f"JSD {probe['jsd']:.3f}"
+                    f.write(f"  - {probe['name']}：{value}（有效 {probe['a_valid']}/{probe['b_valid']}）\n")
+        mt_results = result.get("modeltrace") or []
+        if mt_results:
+            f.write("\n## ModelTrace 候选参考\n\n")
+            f.write("分数是已收录候选之间的闭集相对权重，不是身份真实性概率；Claude 参考样本来自第三方接口。\n\n")
+            f.write(f"参考库 SHA-256：{modeltrace.BANK_SHA256}；上游提交：{modeltrace.UPSTREAM_COMMIT}。\n\n")
+            for item in mt_results:
+                f.write(f"- {item['label']} 第 {item['round']} 轮：有效回答 {item['used_outputs']}/3")
+                if item['status'] == 'ranked':
+                    f.write("；候选：" + "、".join(f"{r['display_name']} {r['probability']:.1%}" for r in item['results'][:3]))
+                else:
+                    reasons = {"duplicate_outputs": "回答序列重复", "patterned_output": "回答呈明显规律", "too_few_valid": "有效样本不足"}
+                    f.write("；" + reasons.get(item.get("reason"), "无法评分") + "，不给候选排名")
+                f.write("\n")
+                for index, diag in enumerate(item["diagnostics"], 1):
+                    f.write(f"  - 挑战 {index}：有效数字 {diag['parsed_numbers']}/{diag['minimum_numbers']}；{'计入' if diag['accepted'] else '未计入'}\n")
+            for pair in result.get("modeltrace_pairs") or []:
+                value = f"Hellinger 距离 {pair['distance']:.4f}" if pair["distance"] is not None else "样本不足或题目不一致"
+                f.write(f"- 第 {pair['round']} 轮 {pair['a']} / {pair['b']}：{value}（只作描述，不能认证身份）\n")
         fp = result.get("fingerprint")
         if fp:
             f.write("\n## 模型指纹（数值分布对账）\n\n")

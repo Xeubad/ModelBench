@@ -22,7 +22,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       # 项目零依赖（只用标准库），不需要 pip install
-      - name: 单元测试（68 项，全程本机假服务，不访问真实接口）
+      - name: 单元测试与集成测试（使用本机假服务）
         run: python3 -m model_test test
 
       - name: 仪器自检（验证平台测时间/分类状态码是否准）

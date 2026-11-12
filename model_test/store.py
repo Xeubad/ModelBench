@@ -24,7 +24,7 @@ OPENCLAW_CONFIG = config.path("openclaw_config")
 RUN_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-\d+(?:_[\w-]{1,30})?\Z")  # 日期-序号[_测试名称]
 NAME_RE = re.compile(r"^[\w-]{1,30}\Z")  # 测试名称：中文、字母、数字、- 和 _
 LEGACY_ID_RE = re.compile(r"^\d{8}-\d{6}\Z")
-API_CHOICES = ("auto", "responses", "chat")
+API_CHOICES = ("auto", "responses", "chat", "anthropic")
 LIMITS = {"name": 40, "models": 300, "model_len": 120}
 _lock = threading.RLock()
 _hist_cache = {}
@@ -98,7 +98,7 @@ def upsert_endpoint(body):
     core.endpoint_parts(base)  # 校验
     api = body.get("api", "auto")
     if api not in API_CHOICES:
-        raise ValueError("接口类型只能是 auto / responses / chat")
+        raise ValueError("接口类型只能是 auto / responses / chat / anthropic")
     key = body.get("api_key")
     if key is not None and (not isinstance(key, str) or len(key) > 400 or any(c.isspace() for c in key)):
         raise ValueError("密钥格式不对（不能含空白）")
@@ -112,9 +112,12 @@ def upsert_endpoint(body):
             raise ValueError("已有同名接口")
         if not cur and not key:
             raise ValueError("新增接口必须填写密钥")
+        changed_connection = bool(cur and (cur.get("base_url") != base.strip().rstrip("/") or (key and key != cur.get("api_key"))))
         if cur is None:
             cur = {"id": "ep-" + secrets.token_hex(4), "models": [], "api_detected": None, "models_checked_at": None}
             eps.append(cur)
+        if changed_connection:
+            cur["api_detected"], cur["models_checked_at"] = None, None
         cur.update(name=name, base_url=base.strip().rstrip("/"), api=api, note=str(body.get("note") or "")[:200])
         if key:
             cur["api_key"] = key
@@ -138,18 +141,18 @@ def delete_endpoint(eid):
 
 def effective_api(ep):
     api = ep.get("api")
-    if api in ("responses", "chat"):
+    if api in ("responses", "chat", "anthropic"):
         return api
-    if ep.get("api_detected") in ("responses", "chat"):
+    if ep.get("api_detected") in ("responses", "chat", "anthropic"):
         return ep["api_detected"]
     raise ValueError(f"接口“{ep['name']}”的类型还没确定，请先点“探测”，或手动指定 responses / chat")
 
 
 def detect_api(ep, model, timeout=40):
-    """用一个模型发最小请求，先试 responses，再试 chat。返回 (api 或 None, 错误说明列表)。"""
+    """用一个模型依次尝试 Responses、Chat 和 Anthropic Messages。"""
     pool, errs = core.Pool(), []
     try:
-        for api in ("responses", "chat"):
+        for api in ("responses", "chat", "anthropic"):
             r = core.stream_request(pool, dict(ep, api=api), core.make_body(api, model, core.DEFAULT_PROMPT), timeout)
             if r["ok"]:
                 return api, errs
@@ -198,7 +201,7 @@ def import_openclaw():
             continue
         models = [(m.get("id") if isinstance(m, dict) else m) for m in p.get("models", [])]
         cur = next((e for e in list_endpoints(public=False) if e["name"] == pid), None)
-        api = {"openai-responses": "responses", "openai-completions": "chat"}.get(p.get("api"), "auto")
+        api = {"openai-responses": "responses", "openai-completions": "chat", "anthropic-messages": "anthropic"}.get(p.get("api"), "auto")
         upsert_endpoint({"id": cur["id"] if cur else None, "name": pid, "base_url": p["baseUrl"], "api_key": p["apiKey"], "api": api,
                          "models": [m for m in models if isinstance(m, str)]})
         n += 1
@@ -387,7 +390,11 @@ def execute(params, emit, stop):
     env = core.make_env(plan, extra, {"created": created, "prompt": params["prompt"], "context": params["context"], "name": params.get("name", "")})
     rows = core.summarize(records)
     fp = core.fp_analysis(records)
+    mt_results = core.modeltrace.analyze_records(records) if "modeltrace" in params["scenarios"] else []
+    mt_pairs = core.modeltrace.compare_records(records, mt_results) if mt_results else []
+    behavior_results = core.behavior.analyze(records, plan["rounds"]) if "behavior" in params["scenarios"] else None
     result = {"id": run_id, "state": "stopped" if stop.is_set() else "done", "env": env, "summary": rows, "fingerprint": fp,
+              "modeltrace": mt_results, "modeltrace_pairs": mt_pairs, "behavior": behavior_results,
               "conclusion": core.conclusion(rows, fp) if rows else ""}
     if records:
         save_result(result, records)

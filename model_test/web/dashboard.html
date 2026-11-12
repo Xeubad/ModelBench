@@ -216,6 +216,20 @@ th.sortable:hover{color:var(--amber)}
 .fl{animation:flash 1.6s}
 @keyframes flash{0%,60%{box-shadow:0 0 0 3px var(--amber)}100%{box-shadow:none}}
 
+/* 模型归因：延续仪器面板的读数层级，优先显示证据范围。 */
+.identity-intro{padding:26px 28px}.identity-kicker{color:var(--amber);font:600 11px var(--mono);letter-spacing:.16em}
+.identity-title{margin:12px 0 8px;font-size:19px;letter-spacing:.04em;color:var(--ink)}
+.identity-title::before{display:none}.identity-intro p{max-width:70ch;color:var(--ink2)}
+.identity-limit{padding:12px 15px;border-left:3px solid var(--amber);background:var(--amber-dim);color:var(--amber2);line-height:1.7}
+.identity-challenge{margin-top:16px}.identity-challenge h3{display:flex;align-items:center;gap:12px}
+.identity-challenge pre{padding:14px;background:var(--bg);border:1px solid var(--line);line-height:1.8;word-break:break-word}
+.identity-challenge textarea{min-height:130px;margin-top:10px;line-height:1.7}
+.identity-results{margin-top:16px}.identity-results details{margin-top:12px}
+.identity-stats{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.identity-stats .tag{font-size:12px;padding:3px 9px}
+.identity-candidates td,.identity-candidates th{padding:8px 10px}
+@media(max-width:720px){.tabs{overflow-x:auto}.tabs button{white-space:nowrap}.identity-intro{padding:20px}}
+
 /* ---------- 入场动效：示波器上电 ---------- */
 @keyframes sweep{from{transform:scaleX(0);opacity:1}to{transform:scaleX(1);opacity:0}}
 .boot{position:fixed;inset:0;background:var(--bg);z-index:99;display:flex;align-items:center;justify-content:center;
@@ -245,7 +259,7 @@ th.sortable:hover{color:var(--amber)}
       <label class="f">接口地址 Base URL</label><input type="text" id="f_url" placeholder="https://xxx.com 或 https://xxx.com/v1">
       <label class="f">密钥 API Key <span id="f_keyhint" class="mute"></span></label><input type="password" id="f_key" autocomplete="off" placeholder="sk-…">
       <label class="f">接口类型</label>
-      <select id="f_api"><option value="auto">自动探测</option><option value="responses">responses（/v1/responses）</option><option value="chat">chat（/v1/chat/completions）</option></select>
+      <select id="f_api"><option value="auto">自动探测</option><option value="responses">responses（/v1/responses）</option><option value="chat">chat（/v1/chat/completions）</option><option value="anthropic">Anthropic Messages（/v1/messages）</option></select>
       <label class="f">模型（每行一个，保存后自动探测并覆盖；也可手填）</label><textarea id="f_models"></textarea>
       <div class="row"><button id="f_save">保存并探测</button><button class="ghost" id="f_cancel">取消</button></div>
       <div class="msg" id="f_msg"></div>
@@ -303,7 +317,7 @@ th.sortable:hover{color:var(--amber)}
 </aside>
 
 <main class="right">
-  <div class="tabs"><button data-tab="result" class="on">结果</button><button data-tab="history">历史与趋势</button><button data-tab="compare">对比</button><button data-tab="merge">合并检验</button><button data-tab="selftest">仪器自检</button></div>
+  <div class="tabs"><button data-tab="result" class="on">结果</button><button data-tab="history">历史与趋势</button><button data-tab="compare">对比</button><button data-tab="merge">合并检验</button><button data-tab="identity">手动归因</button><button data-tab="selftest">仪器自检</button></div>
 
   <div id="tab-result">
     <div id="empty" class="panel mute">还没有结果。左侧选好接口、场景和模型，点“开始测试”；或到“历史与趋势”里打开以前的结果。</div>
@@ -318,6 +332,8 @@ th.sortable:hover{color:var(--amber)}
       <div class="row" style="margin:0 0 9px"><span class="seg" id="viewSeg"><button data-v="table" class="on">总表</button><button data-v="cards">卡片</button></span><span class="mute" id="tblNote" style="font-size:11px"></span></div>
       <div id="tblWrap" style="overflow:auto"><table id="tbl" class="nw"></table></div>
       <div class="cards hidden" id="cards"></div>
+      <div class="panel hidden" id="mtPanel"><h3 style="margin-top:0">ModelTrace 候选参考</h3><div id="mtResults"></div></div>
+      <div class="panel hidden" id="btPanel"><h3 style="margin-top:0">短问题行为分布</h3><div id="btResults"></div></div>
       <div class="charts" style="margin-top:13px">
         <div class="panel"><h3 style="margin-top:0" id="segTitle">分段耗时（中位数）</h3><div id="chartSeg"></div></div>
         <div class="panel"><h3 style="margin-top:0">每次请求的总耗时（红 × 为失败）</h3><div id="chartDots"></div></div>
@@ -357,6 +373,19 @@ th.sortable:hover{color:var(--amber)}
     <div id="mergeBody"></div>
   </div>
 
+  <div id="tab-identity" class="hidden">
+    <div class="panel identity-intro">
+      <div class="identity-kicker">MODELTRACE / MANUAL</div>
+      <h2 class="identity-title">手动分析模型输出</h2>
+      <p>将三条挑战分别发送给同一个待测模型，再将完整回答粘贴回来。本页的分析在本机完成。</p>
+      <div class="identity-limit">结果只在参考库收录的候选中排序。未知模型也会被排到最接近的候选；Claude 参考样本来自第三方接口，分数不能认证模型身份。</div>
+      <div class="row"><button id="mtNew" class="ghost">生成三条挑战</button><span class="mute" id="mtManualMsg" aria-live="polite"></span></div>
+    </div>
+    <div id="mtManualInputs"></div>
+    <div class="row"><button id="mtAnalyze" disabled>分析三份回答</button></div>
+    <div id="mtManualResult"></div>
+  </div>
+
   <div id="tab-selftest" class="hidden">
     <div class="panel"><b style="font-size:12px;letter-spacing:1.4px;text-transform:uppercase;color:var(--ink2)">仪器自检</b>
       <p class="mute" style="margin:5px 0 10px;font-size:12px;line-height:1.75">在本机起一个假模型服务，故意设定延迟（0.5s、2s）、故障（503/504/429…）、工具调用，验证平台测出的时间误差在 ±50ms 内、状态码分类正确、判分器和交替顺序正确。约 10 秒，不访问任何真实接口。测试运行期间不可用。</p>
@@ -392,8 +421,9 @@ const store = {get(k, d) { try { const v = localStorage.getItem("mt2." + k); ret
 /* ---------------- 标签页 ---------------- */
 function tab(name) {
   document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === name));
-  ["result", "history", "compare", "merge", "selftest"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== name));
+  ["result", "history", "compare", "merge", "identity", "selftest"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== name));
   if (name === "history") loadHistory();
+  if (name === "identity" && !mtManualChallenges.length) loadManualChallenges();
 }
 document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => tab(b.dataset.tab));
 
@@ -547,7 +577,7 @@ async function poll() {
     // 结果已随轮询拿到（与落盘内容一致），直接切到“已完成”标题，不再重新拉一次：
     // 免得用户展开的明细被收起、场景 tab 被重置，还多一次 HTTP 请求
     if (j.run_id && j.records && j.records.length) {
-      show({id: j.run_id, rows: j.rows, records: j.records, conclusion: j.conclusion, env: j.env || null, fingerprint: j.fingerprint}, `测试结果 ${j.run_id}（${j.state === "stopped" ? "已停止" : "已完成"}）`);
+      show({id: j.run_id, rows: j.rows, records: j.records, conclusion: j.conclusion, env: j.env || null, fingerprint: j.fingerprint, modeltrace: j.modeltrace, modeltrace_pairs: j.modeltrace_pairs, behavior: j.behavior}, `测试结果 ${j.run_id}（${j.state === "stopped" ? "已停止" : "已完成"}）`);
       location.hash = "run=" + encodeURIComponent(j.run_id);
     } else if (j.run_id) {  // 没有轮询到记录（比如一开始就失败），回退到按 id 拉取
       openRun(j.run_id);
@@ -590,6 +620,75 @@ function fpPanel(fp) {
   html += `<div class="mute" style="font-size:11.5px;margin-top:4px">判定线 = 抽样噪声 × ${FP_NOISE}（不低于 ${FP_FLOOR}）；距离介于 1×–2× 判定线之间时不作判断。</div>`;
   $("fp").innerHTML = html;
 }
+const MT_LIMITATION = "候选权重只在参考库范围内比较，不是身份真实性概率；未知模型也会被分配到已有候选。Claude 参考样本来自第三方接口，不能单凭本结果判断是否替换模型。";
+let mtManualChallenges = [];
+function mtResultHtml(result, title) {
+  const counts = (result.diagnostics || []).map((d, i) => `挑战 ${i + 1}：${d.parsed_numbers}/${d.minimum_numbers} 个有效数字${d.accepted ? "" : "（未计入）"}`).join(" · ");
+  let html = `<div class="identity-results"><b>${esc(title)}</b><div class="identity-stats"><span class="tag">有效回答 ${result.used_outputs}/3</span><span class="tag">参考库 ${esc((result.bank_built_at || "").slice(0, 10))}</span></div><div class="mute">${esc(counts)}</div>`;
+  if (result.status !== "ranked") {
+    const why = result.reason === "duplicate_outputs" ? "存在完全相同的数字序列，不能将其当作独立证据" : result.reason === "patterned_output" ? "数字序列呈明显等差或短周期规律，不符合挑战要求" : "有效回答不足 3 份";
+    return html + `<div class="warnbox">${why}；本轮不显示候选排名。</div></div>`;
+  }
+  const families = (result.family_probabilities || []).map(f => `${esc(f.display_name)} ${pf(f.probability)}`).join(" · ");
+  html += `<div class="identity-limit" style="margin:14px 0">${esc(MT_LIMITATION)}</div><div class="mute">家族候选权重：${families}</div>`;
+  const rows = result.results.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.display_name)}</td><td>${esc(r.family_name)}</td><td>${(r.probability * 100).toFixed(1)}%</td><td>${r.profile_similarity.toFixed(3)}</td></tr>`);
+  html += `<div style="overflow:auto"><table class="identity-candidates"><tr><th>排名</th><th>候选模型</th><th>家族</th><th>闭集相对权重</th><th>分布相似度</th></tr>${rows.slice(0, 5).join("")}</table></div>`;
+  if (rows.length > 5) html += `<details><summary>查看全部 ${rows.length} 个候选</summary><div style="overflow:auto"><table class="identity-candidates"><tr><th>排名</th><th>候选模型</th><th>家族</th><th>闭集相对权重</th><th>分布相似度</th></tr>${rows.join("")}</table></div></details>`;
+  return html + `<div class="mute" style="margin-top:12px;font-size:11px;word-break:break-all">ModelTrace ${esc(result.upstream_commit)} · 参考库 SHA-256 ${esc(result.bank_sha256)}</div></div>`;
+}
+function mtPanel(results, pairs, active) {
+  $("mtPanel").classList.toggle("hidden", !active);
+  if (!active) return;
+  let html = results && results.length ? results.map(r => mtResultHtml(r, `${r.label} · 第 ${r.round} 轮`)).join("")
+    : `<div class="mute">任务结束后按模型、轮次展示候选；每轮需要三份有效回答。</div>`;
+  if (pairs && pairs.length) {
+    html += `<div class="identity-results"><h3>同轮参考线路对照</h3><div class="mute">相同题目下的长数字分布距离，仅供描述；不同协议、上游参数或服务端设置也会影响距离，不能认证模型身份。</div>`;
+    html += pairs.map(p => `<div class="infobox">第 ${p.round} 轮 · ${esc(p.a)} / ${esc(p.b)}：${p.distance == null ? (p.status === "incompatible" ? "题目不一致，无法比较" : "有效样本不足，无法比较") : `Hellinger 距离 ${p.distance.toFixed(4)}（0–1）`}</div>`).join("") + `</div>`;
+  }
+  $("mtResults").innerHTML = html;
+}
+function behaviorPanel(data, active) {
+  $("btPanel").classList.toggle("hidden", !active);
+  if (!active) return;
+  if (!data) { $("btResults").innerHTML = `<div class="mute">任务结束后显示各题的回答分布与样本数。</div>`; return; }
+  let html = `<div class="identity-limit">这是自行设计的短问题分布对比，没有官方模型参考库，也没有经真实模型校准的判定线。差异不能证明模型身份。</div>`;
+  for (const [label, probes] of Object.entries(data.profiles || {})) {
+    html += `<div class="identity-results"><b>${esc(label)}</b><div style="overflow:auto"><table class="identity-candidates"><tr><th>题目</th><th>有效 / 计划</th><th>回答频数</th></tr>`;
+    for (const probe of Object.values(probes)) {
+      const counts = Object.entries(probe.counts).sort((a, b) => b[1] - a[1]).map(([answer, n]) => `${esc(answer)} × ${n}`).join("；") || "无有效回答";
+      html += `<tr><td>${esc(probe.name)}</td><td>${probe.valid}/${probe.planned}</td><td style="white-space:normal">${counts}</td></tr>`;
+    }
+    html += `</table></div></div>`;
+  }
+  for (const pair of data.pairs || []) {
+    html += `<div class="infobox">${esc(pair.a)} / ${esc(pair.b)}：${pair.mean_jsd == null ? "有效样本不足，暂不计算整体距离" : `平均 Jensen–Shannon 散度 ${pair.mean_jsd.toFixed(3)}（0–1，仅供描述）`}`;
+    html += `<div class="mute" style="margin-top:5px">${pair.probes.map(p => `${esc(p.name)}：${p.jsd == null ? "样本不足" : p.jsd.toFixed(3)}（${p.a_valid}/${p.b_valid}）`).join(" · ")}</div></div>`;
+  }
+  $("btResults").innerHTML = html;
+}
+async function loadManualChallenges() {
+  $("mtManualMsg").textContent = "正在生成挑战…";
+  try {
+    const d = await api("/api/modeltrace/challenges");
+    mtManualChallenges = d.challenges;
+    $("mtManualInputs").innerHTML = d.challenges.map((c, i) => `<div class="panel identity-challenge"><h3><span class="tag">0${i + 1}</span>挑战 ${i + 1} · 要求 ${c.expected_count} 个整数 <button class="ghost sm" data-copy-challenge="${i}">复制题目</button></h3><pre>${esc(c.prompt)}</pre><label class="f" for="mtAnswer${i}">粘贴第 ${i + 1} 份完整回答</label><textarea id="mtAnswer${i}" data-mt-answer="${i}" placeholder="粘贴模型输出的数字序列"></textarea></div>`).join("");
+    $("mtManualInputs").querySelectorAll("[data-copy-challenge]").forEach(b => b.onclick = async () => {
+      try { await navigator.clipboard.writeText(mtManualChallenges[+b.dataset.copyChallenge].prompt); $("mtManualMsg").textContent = "题目已复制"; }
+      catch (_) { $("mtManualMsg").textContent = "复制不可用，请手动选中题目复制"; }
+    });
+    $("mtAnalyze").disabled = false; $("mtManualMsg").textContent = "三条挑战已就绪"; $("mtManualResult").innerHTML = "";
+  } catch (e) { $("mtManualMsg").textContent = "生成失败：" + e.message; }
+}
+async function analyzeManual() {
+  $("mtAnalyze").disabled = true; $("mtManualMsg").textContent = "正在分析…";
+  try {
+    const outputs = mtManualChallenges.map((c, i) => ({text: $("mtAnswer" + i).value, expected_count: c.expected_count}));
+    const result = await api("/api/modeltrace/analyze", {outputs});
+    $("mtManualResult").innerHTML = `<div class="panel">${mtResultHtml(result, "手动分析结果")}</div>`;
+    $("mtManualMsg").textContent = "分析完成";
+  } catch (e) { $("mtManualMsg").textContent = "分析失败：" + e.message; }
+  finally { $("mtAnalyze").disabled = false; }
+}
 function show(data, title) {
   const open = snapshotOpen();
   view = data; $("empty").classList.add("hidden"); $("result").classList.remove("hidden");
@@ -605,7 +704,7 @@ function show(data, title) {
   const rows = data.rows.filter(r => r.scenario === viewSc), recs = data.records.filter(r => (r.scenario || "speed") === viewSc);
   $("viewSeg").querySelectorAll("button").forEach(b => { b.classList.toggle("on", b.dataset.v === viewMode); b.onclick = () => { viewMode = b.dataset.v; store.set("view", viewMode); show(view, title); }; });
   $("tblWrap").classList.toggle("hidden", viewMode !== "table"); $("cards").classList.toggle("hidden", viewMode !== "cards");
-  sampleHint(rows); table(rows); cards(rows); chartSeg(rows); chartDots(rows, recs); scatter(rows); matrix(rows); fpPanel(data.fingerprint); codes(data.records); envBox(data.env); detail(recs);
+  sampleHint(rows); table(rows); cards(rows); chartSeg(rows); chartDots(rows, recs); scatter(rows); matrix(rows); fpPanel(data.fingerprint); mtPanel(data.modeltrace, data.modeltrace_pairs, viewSc === "modeltrace"); behaviorPanel(data.behavior, viewSc === "behavior"); codes(data.records); envBox(data.env); detail(recs);
   restoreOpen(open);
 }
 function snapshotOpen() { return new Set([...document.querySelectorAll("#detail details[open], #env details[open]")].map(d => d.dataset.k)); }
@@ -1112,7 +1211,7 @@ function renderMerge() {
 
 async function openRun(id) {
   const d = await api("/api/run/" + encodeURIComponent(id));
-  show({id: d.legacy ? id : id, rows: d.summary, records: d.records, conclusion: d.conclusion, env: d.env, fingerprint: d.fingerprint}, `测试结果 ${id}` + (d.legacy ? "（旧版）" : ""));
+  show({id: d.legacy ? id : id, rows: d.summary, records: d.records, conclusion: d.conclusion, env: d.env, fingerprint: d.fingerprint, modeltrace: d.modeltrace, modeltrace_pairs: d.modeltrace_pairs, behavior: d.behavior}, `测试结果 ${id}` + (d.legacy ? "（旧版）" : ""));
   location.hash = "run=" + encodeURIComponent(id); tab("result");
 }
 
@@ -1130,6 +1229,8 @@ $("stRun").onclick = async () => {
 /* ---------------- 初始化 ---------------- */
 PRESETS.forEach(p => { const b = document.createElement("button"); b.className = "ghost sm"; b.textContent = p.length > 12 ? p.slice(0, 12) + "…" : p; b.title = p; b.onclick = () => { $("prompt").value = p; savePrm(); }; $("presets").appendChild(b); });
 $("addEp").onclick = () => showForm(null); $("f_cancel").onclick = () => $("epForm").classList.add("hidden"); $("f_save").onclick = saveEp;
+$("mtNew").onclick = () => { if ([...document.querySelectorAll("[data-mt-answer]")].some(x => x.value.trim()) && !confirm("生成新题目会清空当前回答，继续吗？")) return; loadManualChallenges(); };
+$("mtAnalyze").onclick = analyzeManual;
 $("impEp").onclick = async () => { try { const r = await api("/api/endpoints/import", {}); await loadEndpoints(); $("epMsg").className = "msg ok"; $("epMsg").textContent = `已导入 ${r.imported} 个供应商；接口类型为“自动”的请点“探测模型”确认。`; } catch (e) { $("epMsg").className = "msg err"; $("epMsg").textContent = e.message; } };
 $("run").onclick = start; $("stop").onclick = () => api("/api/stop", {});
 $("mfilter").oninput = renderModels; $("trendSc").onchange = () => { trendConds(); trend(); }; $("trendCond").onchange = trend; $("cmpBtn").onclick = compareRuns; $("mergeBtn").onclick = mergeRuns;

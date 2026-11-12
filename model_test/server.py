@@ -23,7 +23,7 @@ import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import config, core, selftest, store
+from . import config, core, modeltrace, selftest, store
 
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "dashboard.html")
 _L = config.CFG["limits"]
@@ -149,7 +149,8 @@ def run_job(params):
         res = store.execute(params, emit, STOP)
         with LOCK:
             JOB.update(state=res["state"], rows=res["summary"], conclusion=res["conclusion"], run_id=res["id"], records=res["records"],
-                       fingerprint=res.get("fingerprint"), env=res.get("env"), current="")
+                       fingerprint=res.get("fingerprint"), modeltrace=res.get("modeltrace"), modeltrace_pairs=res.get("modeltrace_pairs"),
+                       behavior=res.get("behavior"), env=res.get("env"), current="")
     except Exception as e:  # noqa: BLE001
         with LOCK:
             JOB.update(state="error", error=f"{type(e).__name__}: {e}")
@@ -193,6 +194,10 @@ def validate(body):
     effort = body.get("effort", "")
     if effort not in core.EFFORTS:
         raise ValueError("推理强度只能是 不指定 / low / medium / high")
+    if ("modeltrace" in scen or "behavior" in scen) and effort:
+        raise ValueError("模型分布测试使用默认推理设置；请将推理强度设为不指定")
+    if "modeltrace" in scen:
+        modeltrace.load_bank()  # 先验证本地参考库，再允许启动可能计费的请求。
     concurrency = body.get("concurrency", 1)
     if not isinstance(concurrency, int) or isinstance(concurrency, bool) or not 1 <= concurrency <= 4:
         raise ValueError("并发范围 1–4")
@@ -292,6 +297,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, f.read(), "text/html; charset=utf-8")
             if path == "/api/config":
                 return self._send(200, public_config())
+            if path == "/api/modeltrace/challenges":
+                return self._send(200, {"challenges": modeltrace.challenges(secrets.randbits(31))})
             if path == "/api/endpoints":
                 return self._send(200, {"endpoints": store.list_endpoints()})
             if path == "/api/job":
@@ -374,6 +381,15 @@ class Handler(BaseHTTPRequestHandler):
                     info = lan_info()
                 info["warning"] = ("页面没有登录，同网段任何人拿到这个地址都能使用你保存的接口密钥。" if want else None)
                 return self._send(200, info)
+            if path == "/api/modeltrace/analyze":
+                outputs = body.get("outputs")
+                if not isinstance(outputs, list) or len(outputs) > 3 or any(
+                    not isinstance(item, dict) or not isinstance(item.get("text"), str) or len(item["text"]) > 20000
+                    or not isinstance(item.get("expected_count", 0), int) or isinstance(item.get("expected_count", 0), bool)
+                    or not 0 <= item.get("expected_count", 0) <= 1000 for item in outputs
+                ):
+                    raise ValueError("最多输入三份回答，每份不超过 20000 字符，数量须为 0–1000 的整数")
+                return self._send(200, modeltrace.analyze_outputs(outputs))
             if path == "/api/merge":
                 ids = body.get("ids")
                 if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
