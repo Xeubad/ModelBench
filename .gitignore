@@ -1,11 +1,16 @@
 # 接口地址与明文密钥 —— 绝不进 git
 data/endpoints.json
 
+# 用户导入或训练的参考库及其样本为本机资产
+data/modeltrace-banks/
+data/modeltrace-references/
+
 # 每次测试的结果（含真实接口的完整回答、raw 流事件，体积大且是本机资产）
 results/
 results/.trash/
 
 # Python
+.venv-reference/
 __pycache__/
 *.pyc
 

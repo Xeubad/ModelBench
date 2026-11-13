@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""模型测试引擎（网页和命令行共用）：支持 OpenAI 兼容接口及 Anthropic Messages，记录请求和流事件。
+"""模型测试引擎（网页和命令行共用）：支持 OpenAI、Anthropic、Gemini、Azure 和 Bedrock 接口。
 
 做了什么：
-- 接口类型：responses、chat、anthropic；地址没写版本号时自动补 /v1。
+- 接口类型：responses、chat、anthropic、gemini、azure、bedrock；按协议构造路径与鉴权。
 - 公平性：每个接口复用一条连接（TCP/TLS 握手单独记录，不算进请求耗时）；每个模型先发一次不计入的预热请求；
   每一轮把“全部模型 × 全部题目”随机打乱顺序再发（种子保存在结果里，可复现）；同一接口两次请求之间留间隔，避免 429。
 - 计时拆开：连接、响应头、首个事件、首个思考、首个正文字、总耗时、输出速度（tokens/秒）。
 - 场景：speed（自定义提示词）、quiz（10 道有标准答案的题，自动判分）、tool（两步工具调用，含把 reasoning 项回放）、
   needle10k / needle30k（大海捞针）、ModelTrace 候选和短问题分布。判分不让模型自评。
 - 统计：中位数、p95、最小、最大；样本 < 5 标“样本不足”；固定题集仅报告描述性正确率和一致性。
-不改任何 OpenClaw 配置，不经过网关，不走终端代理，不保存密钥。
+直接请求用户配置的模型接口，不依赖其他应用；引擎本身不保存密钥。
 时间度量一律用单调时钟 time.perf_counter()（不受系统校时影响），只有记录“几点几分”用墙上时钟。
 """
 import datetime as dt
@@ -27,11 +27,11 @@ import threading
 import time
 import urllib.parse
 
-from . import behavior, modeltrace
+from . import azure, bedrock, behavior, custom_http, gemini, modeltrace, modeltrace_suite
 
-VERSION = "2.9.0"
+VERSION = "2.11.0"
 SCHEMA_VERSION = 3
-METHOD_VERSION = "5"  # 变更请求、判分或测量口径时更新，旧结果不自动合并
+METHOD_VERSION = "7"  # 变更请求、判分或测量口径时更新，旧结果不自动合并
 CONTEXT_CHOICES = (0, 10000, 30000)  # 自定义提示词前的背景文字长度（约 tokens）；0 = 不加
 LOW_SAMPLE = 5
 P95_MIN_N = 20  # 样本少于这个数，p95 基本等于最大值，不展示
@@ -57,6 +57,7 @@ SCENARIOS = {
     "needle_matrix": "长上下文矩阵（12题，费用较高）",
     "fingerprint": "模型指纹（数值分布对账）",
     "modeltrace": "ModelTrace 模型候选（每轮 3 次长数字挑战）",
+    "modeltrace_enroll": "ModelTrace 参考库采集（每模型 36 次）",
     "behavior": "短问题行为分布（每轮 4 次）",
 }
 _FILLER_UNIT = "长汀县汀江流域河田段农业面源污染治理项目采用MET混合滤料包与土建安装相结合的方式，招标文件要求投标人提供CMA检测报告并加盖公章。"  # 约 41 tokens
@@ -123,6 +124,8 @@ def endpoint_parts(base_url):
     u = urllib.parse.urlsplit((base_url or "").strip())
     if u.scheme not in ("http", "https") or not u.hostname:
         raise ValueError("地址必须以 http:// 或 https:// 开头")
+    if u.username is not None or u.password is not None or u.query or u.fragment:
+        raise ValueError("接口地址不能包含用户信息、查询参数或片段，请把密钥填在密钥栏")
     path = u.path.rstrip("/")
     for tail in ("/chat/completions", "/responses", "/models", "/messages"):
         if path.endswith(tail):
@@ -134,6 +137,67 @@ def endpoint_parts(base_url):
 
 def clip(text, n=300):
     return (text or "").replace("\n", " ")[:n]
+
+
+def redact_text(value, secret):
+    """隐藏已知密钥的原文和 URL 编码；短密钥只按独立词匹配以降低误伤。"""
+    if not isinstance(value, str) or not secret:
+        return value
+    variants = {secret, urllib.parse.quote(secret, safe=""), urllib.parse.quote_plus(secret, safe="")}
+    for token in sorted(variants, key=len, reverse=True):
+        if len(token) < 8:
+            value = re.sub(r"(?<!\w)" + re.escape(token) + r"(?!\w)", "[已隐藏密钥]", value)
+        else:
+            value = value.replace(token, "[已隐藏密钥]")
+    return value
+
+
+def _redact_value(value, secret, mask_keys=False):
+    if isinstance(value, str):
+        return redact_text(value, secret)
+    if isinstance(value, list):
+        return [_redact_value(item, secret, mask_keys) for item in value]
+    if isinstance(value, dict):
+        return {(redact_text(key, secret) if mask_keys and isinstance(key, str) else key): _redact_value(item, secret, mask_keys)
+                for key, item in value.items()}
+    return value
+
+
+def _response_fragments(value):
+    """汇集常见流协议的文本分片，检测跨事件拆分的密钥。"""
+    if isinstance(value, list):
+        for item in value:
+            yield from _response_fragments(item)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(item, str) and key in ("content", "text", "reasoning", "reasoning_content", "thinking", "partial_json", "message", "arguments", "delta"):
+                yield item
+            elif isinstance(item, (dict, list)):
+                yield from _response_fragments(item)
+
+
+def _redact_record(rec, secret):
+    if not secret:
+        return rec
+    events = rec.get("events") or []
+    replay = rec.get("_replay") or {}
+    fragments = "".join(_response_fragments(events))
+    candidates = (rec.get("text") or "", fragments, json.dumps(events, ensure_ascii=False),
+                  json.dumps(replay, ensure_ascii=False), json.dumps(rec.get("tool_calls") or [], ensure_ascii=False))
+    sensitive_output = any(redact_text(text, secret) != text for text in candidates)
+    if sensitive_output:
+        # 流事件可能把密钥拆成多个片段，逐项替换不能保证无法重组。
+        rec["events"] = [{"t": event.get("t"), "event": {"type": "redacted"}} for event in events]
+        rec["ok"] = False
+        rec["error"] = "响应包含已隐藏的密钥；为避免污染评测，本次不计成功"
+        if rec.get("pass") is not None:
+            rec["pass"], rec["grade_note"] = False, rec["error"]
+        rec["sensitive_output_redacted"] = True
+        rec["_replay"] = {"items": [], "reasoning": "", "text": ""}
+    for key in list(rec):
+        if not key.startswith("_"):
+            rec[key] = _redact_value(rec[key], secret, mask_keys=True)
+    return rec
 
 
 def _new_conn(ep, timeout):
@@ -186,33 +250,90 @@ def label_of(ep, model):
 
 
 def _auth_headers(ep):
+    """本地兼容服务可不使用密钥；有密钥时按接口协议传递。"""
+    key = ep.get("api_key") or ""
     if ep.get("api") == "anthropic":
-        return {"x-api-key": ep["api_key"], "anthropic-version": "2023-06-01"}
-    return {"Authorization": "Bearer " + ep["api_key"]}
+        return {**({"x-api-key": key} if key else {}), "anthropic-version": "2023-06-01"}
+    if ep.get("api") == "gemini":
+        return {"x-goog-api-key": key} if key else {}
+    if ep.get("api") == "bedrock":
+        return {}  # AWS SigV4 在请求准备时生成。
+    if ep.get("api") == "azure" and ep.get("azure_auth", "api_key") == "api_key":
+        return {"api-key": key} if key else {}
+    if ep.get("api") in ("chat", "responses", "auto"):
+        mode = ep.get("auth_mode", "bearer")
+        if mode == "custom":
+            custom_http.validate_auth(mode, ep.get("auth_header", ""), ep.get("auth_prefix", ""))
+            return {ep["auth_header"]: ep.get("auth_prefix", "") + key} if key else {}
+        if mode in ("api-key", "x-api-key"):
+            return {mode: key} if key else {}
+    return {"Authorization": "Bearer " + key} if key else {}
 
 
 def fetch_models(ep, timeout=20):
-    """GET {base}/models，返回模型 id 列表（OpenAI 兼容格式）。失败抛 RuntimeError。"""
+    """读取完整模型列表；分页失败或游标循环时抛错，不返回可能误导的部分结果。"""
     _, _, _, prefix = endpoint_parts(ep["base_url"])
     styles = ("responses", "anthropic") if ep.get("api") == "auto" else (ep.get("api"),)
-    for index, style in enumerate(styles):
-        conn, _ = _new_conn(ep, timeout)
+    deadline = time.perf_counter() + timeout
+
+    def request(style, path):
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            raise TimeoutError("读取模型列表超时")
+        conn, _ = _new_conn(ep, remaining)
         try:
-            conn.request("GET", prefix + "/models", headers={**_auth_headers(dict(ep, api=style)), "Accept": "application/json",
-                                                              "User-Agent": "modelbench/" + VERSION})
+            if ep.get("api") in ("auto", "chat", "responses", "anthropic"):
+                path = custom_http.append_query(path, ep.get("query_params"))
+            conn.request("GET", path, headers={**_auth_headers(dict(ep, api=style)), "Accept": "application/json",
+                                               "User-Agent": "modelbench/" + VERSION})
             resp = conn.getresponse()
-            body = resp.read().decode("utf-8", "replace")
+            raw = resp.read(2_000_001)
+            if len(raw) > 2_000_000:
+                raise ValueError("单页模型列表过大")
+            return resp.status, raw.decode("utf-8", "replace")
         finally:
             conn.close()
-        if resp.status == 200:
+
+    if ep.get("api") == "gemini":
+        return gemini.fetch_models(ep, request, redact_text)
+    if ep.get("api") == "azure":
+        raise ValueError("Azure 请手动填写部署名称；模型目录不能代表可用部署")
+    if ep.get("api") == "bedrock":
+        return bedrock.fetch_models(ep, timeout, _new_conn, redact_text)
+    for index, style in enumerate(styles):
+        status, body = request(style, prefix + "/models")
+        if status == 200:
             break
-        if index + 1 == len(styles) or resp.status not in (400, 401, 403, 404, 405):
-            raise RuntimeError(f"HTTP {resp.status} {clip(body, 160)}")
-    data = json.loads(body)
-    items = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), list) else (
-        data.get("models") if isinstance(data, dict) else data)
-    ids = [(x.get("id") or x.get("name")) if isinstance(x, dict) else x for x in (items or [])]
-    return sorted({i for i in ids if isinstance(i, str) and i})
+        if index + 1 == len(styles) or status not in (400, 401, 403, 404, 405):
+            raise RuntimeError(f"HTTP {status} {clip(redact_text(body, ep.get('api_key')), 160)}")
+    found, seen_cursors = set(), set()
+    for _ in range(50):
+        data = json.loads(body)
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict) and isinstance(data.get("data"), list):
+            items = data["data"]
+        elif isinstance(data, dict) and isinstance(data.get("models"), list):
+            items = data["models"]
+        else:
+            raise ValueError("接口返回的模型列表格式不正确")
+        for item in items:
+            model = (item.get("id") or item.get("name")) if isinstance(item, dict) else item
+            if isinstance(model, str) and model and redact_text(model, ep.get("api_key")) == model:
+                found.add(model)
+        if len(found) > 5000:
+            raise ValueError("模型列表超过 5000 个，请手动配置")
+        if not isinstance(data, dict) or not data.get("has_more"):
+            return sorted(found)
+        cursor = data.get("last_id")
+        if not isinstance(cursor, str) or not cursor or len(cursor) > 512 or cursor in seen_cursors or redact_text(cursor, ep.get("api_key")) != cursor:
+            raise ValueError("模型分页游标缺失、无效或重复")
+        seen_cursors.add(cursor)
+        key = "after_id" if style == "anthropic" else "after"
+        status, body = request(style, prefix + "/models?" + urllib.parse.urlencode({key: cursor}))
+        if status != 200:
+            raise RuntimeError(f"读取模型列表后续页面失败：HTTP {status} {clip(redact_text(body, ep.get('api_key')), 160)}")
+    raise ValueError("模型列表页数超过上限")
 
 
 # ---------------------------------------------------------------- 单次流式请求
@@ -220,7 +341,7 @@ def fetch_models(ep, timeout=20):
 def with_effort(body, api, effort):
     """推理强度：responses 传 reasoning.effort，chat 传 reasoning_effort；空字符串 = 不传。"""
     if effort:
-        if api == "chat":
+        if api in ("chat", "azure"):
             body["reasoning_effort"] = effort
         elif api == "anthropic":
             body["output_config"] = {"effort": effort}
@@ -234,7 +355,15 @@ def make_body(api, model, prompt, system=None, effort=""):
     采样参数显式固定：不同中转站/接口的默认 temperature、max_tokens 往往不同，
     不固定的话“同一模型不同接口”的差异里会混进采样参数差异，不是模型本身差异。
     固定值同时写进环境快照（SAMPLING），复现和对比时可核对。"""
-    if api == "chat":
+    if api == "gemini":
+        if effort:
+            raise ValueError("Gemini 原生接口暂不支持统一推理强度参数")
+        return gemini.make_body(model, prompt, system, MAX_TOKENS)
+    if api == "bedrock":
+        if effort:
+            raise ValueError("Bedrock 原生接口暂不支持统一推理强度参数")
+        return bedrock.make_body(model, prompt, system, MAX_TOKENS)
+    if api in ("chat", "azure"):
         msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
         return with_effort({"model": model, "messages": msgs, "stream": True, "stream_options": {"include_usage": True}, **SAMPLING_CHAT}, api, effort)
     if api == "anthropic":
@@ -366,7 +495,10 @@ def _consume(rec, ev, api, acc, now):
     if api == "anthropic":
         _consume_anthropic(rec, ev, acc, now)
         return
-    if api == "chat":
+    if api == "gemini":
+        gemini.consume(rec, ev, acc, now)
+        return
+    if api in ("chat", "azure"):
         rec["returned_model"] = ev.get("model") or rec.get("returned_model")
         rec["system_fingerprint"] = ev.get("system_fingerprint") or rec.get("system_fingerprint")
         if ev.get("error"):
@@ -423,6 +555,15 @@ def _consume_json_body(rec, acc, api, payload):
     标 non_stream=True（首字不是真首字，与 buffered 同口径）。没有这一步，这类中转站会被误判成“流在完成事件之前断开”。"""
     rec["returned_model"] = payload.get("model")
     rec["system_fingerprint"] = payload.get("system_fingerprint")
+    if api == "gemini":
+        rec["first_token_s"] = None
+        gemini.consume(rec, payload, acc, rec["first_event_s"])
+        rec["text"] = "".join(acc["text"])
+        return
+    if api == "bedrock":
+        rec["first_token_s"] = None
+        bedrock.consume_json(rec, payload, acc, rec["first_event_s"])
+        return
     if api == "anthropic":
         acc["items"] = payload.get("content") or []
         rec["text"] = "".join(it.get("text", "") for it in acc["items"] if it.get("type") == "text")
@@ -434,7 +575,7 @@ def _consume_json_body(rec, acc, api, payload):
         rec["stop_reason"] = payload.get("stop_reason")
         rec["response_status"] = "completed" if rec["stop_reason"] in ("end_turn", "stop_sequence", "tool_use") else "incomplete"
         return
-    if api == "chat":
+    if api in ("chat", "azure"):
         choice = (payload.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
         rec["text"] = msg.get("content") or ""
@@ -459,53 +600,77 @@ def _consume_json_body(rec, acc, api, payload):
     rec["text"] = "".join(texts)
 
 
-def stream_request(pool, ep, body, timeout):
-    """发一次请求；复用连接失败时最多重试一次，并记录每次尝试和端到端时间。"""
+def stream_request(pool, ep, body, timeout, redaction_keys=None):
+    """发一次请求，不自动重发可能已送达的 POST；记录送达状态和端到端时间。"""
     api = ep["api"]
     rec = _new_rec(ep, body["model"], api)
-    rec["request_config"] = {k: body[k] for k in ("model", "stream", "temperature", "max_tokens", "max_output_tokens", "reasoning", "reasoning_effort", "output_config", "stream_options") if k in body}
+    rec["request_config"] = {k: body[k] for k in ("model", "stream", "temperature", "max_tokens", "max_output_tokens", "reasoning", "reasoning_effort", "output_config", "stream_options", "generationConfig", "inferenceConfig") if k in body}
     acc = {"text": [], "reasoning": [], "items": [], "calls": {}}
-    path = endpoint_parts(ep["base_url"])[3] + {"chat": "/chat/completions", "responses": "/responses", "anthropic": "/messages"}[api]
-    data = json.dumps(body).encode()
+    if api == "gemini":
+        path = gemini.request_path(ep["base_url"], body["model"])
+    elif api == "azure":
+        path = azure.request_path(ep["base_url"], body["model"], ep.get("azure_api_version", azure.DEFAULT_API_VERSION))
+    elif api == "bedrock":
+        path = bedrock.request_path(ep["base_url"], body["model"])
+    else:
+        path = endpoint_parts(ep["base_url"])[3] + {"chat": "/chat/completions", "responses": "/responses", "anthropic": "/messages"}[api]
+        path = custom_http.append_query(path, ep.get("query_params"))
+    wire_body = {k: v for k, v in body.items() if k != "model"} if api in ("gemini", "azure", "bedrock") else body
+    data = json.dumps(wire_body).encode()
     headers = {**_auth_headers(ep), "Content-Type": "application/json", "Accept": "text/event-stream",
                "User-Agent": "modelbench/" + VERSION}
-    conn_errors = (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError,
-                   http.client.ResponseNotReady, http.client.CannotSendRequest, http.client.BadStatusLine)
     logical_start = t0 = time.perf_counter()
     rec["attempts"] = []
-    attempt_recorded = False
+    send_started = False
+    aws_secrets = []
     try:
-        for attempt in (0, 1):
-            t0 = time.perf_counter()
-            attempt_recorded = False
-            conn, reused, cs = pool.get(ep, timeout)
-            if attempt == 0:
-                rec["first_reused"] = reused  # 重试前的连接状态：连接复用率看这个，reused 会因重试变成 False
-            rec["reused"], rec["connect_s"] = reused, cs
-            t0 = time.perf_counter()
-            try:
-                conn.request("POST", path, body=data, headers=headers)
-                resp = conn.getresponse()
-                break
-            except conn_errors as e:
-                rec["attempts"].append({"reused": reused, "elapsed_s": round(time.perf_counter() - t0, 3), "error": type(e).__name__})
-                attempt_recorded = True
-                pool.drop(ep)
-                if reused and attempt == 0:
-                    rec["conn_retry"] = True
-                    continue
-                raise
+        if api == "bedrock":
+            credentials = ep.get("_aws_credentials") or bedrock.resolve_credentials(ep.get("aws_profile", ""))
+            aws_secrets = bedrock.secrets_of(credentials)
+            parsed = urllib.parse.urlsplit(ep["base_url"])
+            url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+            signed = bedrock.sign_headers("POST", url, data, credentials, ep.get("aws_region", bedrock.DEFAULT_REGION))
+            headers.update(signed)
+            headers["Accept"] = "application/vnd.amazon.eventstream"
+            aws_secrets.extend([signed["Authorization"], signed["Authorization"].split("Signature=")[-1]])
+        conn, reused, cs = pool.get(ep, timeout)
+        rec["first_reused"] = reused
+        rec["reused"], rec["connect_s"] = reused, cs
+        t0 = time.perf_counter()
+        # request/getresponse 任一阶段出错都无法证明上游没收到请求，不能自动重发。
+        send_started = True
+        conn.request("POST", path, body=data, headers=headers)
+        resp = conn.getresponse()
         rec["status"] = resp.status
         rec["headers_s"] = round(time.perf_counter() - t0, 3)
         if resp.status != 200:
-            rec["error"] = clip(resp.read().decode("utf-8", "replace"))
+            rec["error"] = clip(redact_text(resp.read().decode("utf-8", "replace"), ep.get("api_key")))
+        elif api == "bedrock" and "application/vnd.amazon.eventstream" in (resp.getheader("Content-Type") or ""):
+            for kind, value, message_type in bedrock.read_events(resp):
+                if time.perf_counter() - t0 > timeout:
+                    raise TimeoutError(f"超过 {timeout} 秒仍未结束")
+                now = round(time.perf_counter() - t0, 3)
+                rec["events"].append({"t": now, "event": {"type": kind, "message_type": message_type, "payload": value}})
+                bedrock.consume(rec, kind, value, message_type, acc, now)
+            if resp.length not in (None, 0):
+                raise http.client.IncompleteRead(b"", resp.length)
+            resp.close()
+            rec["text"] = "".join(acc["text"])
+            acc["items"] = [acc.get("bedrock_blocks", {})[i] for i in sorted(acc.get("bedrock_blocks", {}))]
+            calls = [acc["calls"][k] for k in sorted(acc["calls"])]
+            rec["tool_calls"] = calls
+            rec["ok"] = rec["response_status"] == "completed" and bool(rec["text"] or calls) and not rec["error"]
+            if not rec["response_status"] and not rec["error"]:
+                rec["error"] = "Bedrock 流在消息结束事件之前断开"
+            elif rec["response_status"] != "completed" and not rec["error"]:
+                rec["error"] = "Bedrock 响应未完整完成"
         elif "text/event-stream" not in (resp.getheader("Content-Type") or ""):
             # 中转站忽略 stream:true，一次性返回 JSON：能正常读出回答，但“首字”不是模型真正的首字
             raw = resp.read().decode("utf-8", "replace")
             try:
                 payload = json.loads(raw)
             except ValueError:
-                raise ValueError(f"返回的不是流也不是 JSON（Content-Type {resp.getheader('Content-Type')}）：{clip(raw, 120)}")
+                raise ValueError(f"返回的不是流也不是 JSON（Content-Type {resp.getheader('Content-Type')}）：{clip(redact_text(raw, ep.get('api_key')), 120)}")
             now = round(time.perf_counter() - t0, 3)
             rec["first_event_s"] = rec["first_token_s"] = now
             rec["non_stream"] = True
@@ -555,12 +720,13 @@ def stream_request(pool, ep, body, timeout):
         if resp.will_close:
             pool.drop(ep)
     except Exception as e:  # noqa: BLE001
-        rec["error"] = clip(f"{type(e).__name__}: {e}")
+        rec["error"] = clip(redact_text(f"{type(e).__name__}: {e}", ep.get("api_key")))
+        rec["delivery_uncertain"] = bool(send_started and rec["status"] is None)
         pool.drop(ep)
     rec["total_s"] = round(time.perf_counter() - t0, 3)
-    rec["wall_total_s"] = round(time.perf_counter() - logical_start, 3)  # 包含重连和失败的前次尝试
-    if not attempt_recorded:
-        rec["attempts"].append({"reused": rec["reused"], "elapsed_s": rec["total_s"], "status": rec["status"], "error": rec["error"]})
+    rec["wall_total_s"] = round(time.perf_counter() - logical_start, 3)
+    rec["attempts"].append({"reused": rec["reused"], "elapsed_s": rec["total_s"], "status": rec["status"],
+                            "error": rec["error"], "delivery_uncertain": rec.get("delivery_uncertain", False)})
     # 客户端观测值，不能归因于服务端排队。
     if rec["headers_s"] is not None and rec["first_event_s"] is not None:
         rec["queue_s"] = round(max(rec["first_event_s"] - rec["headers_s"], 0), 3)
@@ -571,7 +737,7 @@ def stream_request(pool, ep, body, timeout):
     rec["reasoning_tokens"] = usage.get("reasoning_tokens") or (usage.get("output_tokens_details") or {}).get("reasoning_tokens")
     start = rec["first_token_s"] if rec["first_token_s"] is not None else rec["first_event_s"]
     visible = (out or 0) - (rec["reasoning_tokens"] or 0)  # 输出速度只算“可见回答”的 tokens：推理 tokens 是首个可见字之前产生的，时间不在分母里，算进去会虚高
-    if visible > 0 and start is not None and rec["total_s"] - start > 0.05:
+    if visible > 0 and not rec.get("reasoning_tokens_unknown") and start is not None and rec["total_s"] - start > 0.05:
         rec["tps"] = round(visible / (rec["total_s"] - start), 1)
     if out and rec["total_s"] > 0.05:
         rec["tps_overall"] = round(out / rec["total_s"], 1)  # 含等待的整体速度；中转站攒满返回时 tps 算不出，用它
@@ -579,6 +745,8 @@ def stream_request(pool, ep, body, timeout):
     rec["buffered"] = bool(rec["ok"] and rec["first_event_s"] is not None and rec["total_s"] >= BUFFER_MIN_TOTAL
                            and rec["total_s"] - rec["first_event_s"] <= 0.03 * rec["total_s"] + 0.1) or rec["non_stream"]
     rec["_replay"] = {"items": acc["items"], "reasoning": "".join(acc["reasoning"]), "text": rec["text"]}
+    for secret in dict.fromkeys([ep.get("api_key")] + list(redaction_keys or []) + aws_secrets):
+        _redact_record(rec, secret)
     return rec
 
 
@@ -623,6 +791,13 @@ def build_tasks(scenarios, prompt=DEFAULT_PROMPT, context=0):
         elif sc == "modeltrace":
             tasks += [dict(item, scenario=sc, kind="modeltrace", name=f"长数字挑战 {i + 1}")
                       for i, item in enumerate(modeltrace.challenges(0))]
+        elif sc == "modeltrace_enroll":
+            for item in modeltrace_suite.fingerprint_suite():
+                prompt = ((item["user_prefix"] + "\n\nFinal task:\n") if item["user_prefix"] else "") + item["prompt"]
+                tasks.append({"id": item["challenge_id"], "scenario": sc, "kind": sc,
+                              "name": item["condition"] + " · " + item["challenge_id"],
+                              "condition_id": item["condition"], "transport": item["transport"],
+                              "expected_count": item["expected_count"], "prompt": prompt, "system": item["system"]})
         elif sc == "behavior":
             tasks += behavior.tasks()
     return tasks
@@ -735,12 +910,16 @@ def _tool_args_ok(call):
     return call.get("name") == TOOL_DEF["name"] and isinstance(args, dict) and args.get("item") == TOOL_RESULT["item"]
 
 
-def run_tool(pool, ep, model, task, timeout, effort=""):
+def run_tool(pool, ep, model, task, timeout, effort="", redaction_keys=None):
     """验证工具调用以及对本次工具返回结果的使用。"""
     logical_start = time.perf_counter()
     api = ep["api"]
-    if api == "chat":
+    if api in ("chat", "azure"):
         tool = {"type": "function", "function": TOOL_DEF}
+    elif api == "gemini":
+        tool = {"functionDeclarations": [{"name": TOOL_DEF["name"], "description": TOOL_DEF["description"], "parametersJsonSchema": TOOL_DEF["parameters"]}]}
+    elif api == "bedrock":
+        tool = {"toolSpec": {"name": TOOL_DEF["name"], "description": TOOL_DEF["description"], "inputSchema": {"json": TOOL_DEF["parameters"]}}}
     elif api == "anthropic":
         tool = {"name": TOOL_DEF["name"], "description": TOOL_DEF["description"], "input_schema": TOOL_DEF["parameters"]}
     else:
@@ -749,13 +928,16 @@ def run_tool(pool, ep, model, task, timeout, effort=""):
     body1 = make_body(api, model, task["prompt"], effort=effort)
     if api == "responses":
         body1["input"] = [user]
-    body1["tools"] = [tool]
-    r1 = stream_request(pool, ep, body1, timeout)
+    if api == "bedrock":
+        body1["toolConfig"] = {"tools": [tool]}
+    else:
+        body1["tools"] = [tool]
+    r1 = stream_request(pool, ep, body1, timeout, redaction_keys=redaction_keys)
     _grade(r1, task)
     r1["tool_result"] = task.get("tool_result", TOOL_RESULT)
     r1["steps"] = [{"step": 1, "ok": r1["ok"], "status": r1["status"], "total_s": r1["total_s"], "error": r1["error"], "request_config": r1["request_config"]}]
     call = next((c for c in r1["tool_calls"] if c.get("name")), None)
-    if not r1["ok"] or not call or not _tool_args_ok(call):
+    if not r1["ok"] or not call or not _tool_args_ok(call) or (api == "bedrock" and not call.get("id")):
         r1["wall_total_s"] = round(time.perf_counter() - logical_start, 3)
         r1["pass"] = False
         r1["grade_note"] = ("第一步请求失败：" + (r1["error"] or "") if not r1["ok"] else
@@ -764,7 +946,7 @@ def run_tool(pool, ep, model, task, timeout, effort=""):
     expected = task.get("tool_result", TOOL_RESULT)
     result = json.dumps(expected, ensure_ascii=False)
     rp = r1["_replay"]
-    if api == "chat":
+    if api in ("chat", "azure"):
         asst = {"role": "assistant", "content": rp["text"] or None,
                 "tool_calls": [{"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": call["arguments"]}}]}
         if rp["reasoning"]:
@@ -775,10 +957,23 @@ def run_tool(pool, ep, model, task, timeout, effort=""):
         body2 = make_body(api, model, task["prompt"], effort=effort)
         body2.update(tools=[tool], messages=[user, {"role": "assistant", "content": rp["items"]},
                                              {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call["id"], "content": result}]}])
+    elif api == "bedrock":
+        body2 = make_body(api, model, task["prompt"], effort=effort)
+        body2.update(toolConfig={"tools": [tool]}, messages=[{"role": "user", "content": [{"text": task["prompt"]}]},
+                     {"role": "assistant", "content": rp["items"]},
+                     {"role": "user", "content": [{"toolResult": {"toolUseId": call["id"], "content": [{"json": expected}]}}]}])
+    elif api == "gemini":
+        response = {"name": call["name"], "response": expected}
+        if call.get("id"):
+            response["id"] = call["id"]
+        body2 = make_body(api, model, task["prompt"], effort=effort)
+        body2.update(tools=[tool], contents=[{"role": "user", "parts": [{"text": task["prompt"]}]},
+                                            {"role": "model", "parts": rp["items"]},
+                                            {"role": "user", "parts": [{"functionResponse": response}]}])
     else:
         body2 = make_body(api, model, task["prompt"], effort=effort)
         body2.update(tools=[tool], input=[user] + rp["items"] + [{"type": "function_call_output", "call_id": call["id"], "output": result}])
-    r2 = stream_request(pool, ep, body2, timeout)
+    r2 = stream_request(pool, ep, body2, timeout, redaction_keys=redaction_keys)
     rec = dict(r2)
     rec["time"] = r1["time"]
     rec["total_s"] = round(r1["total_s"] + r2["total_s"], 3)
@@ -801,18 +996,25 @@ def run_tool(pool, ep, model, task, timeout, effort=""):
     return rec
 
 
-def run_task(pool, ep, model, task, timeout, effort=""):
+def run_task(pool, ep, model, task, timeout, effort="", redaction_keys=None):
     if task["kind"] == "tool":
-        return run_tool(pool, ep, model, task, timeout, effort)
+        return run_tool(pool, ep, model, task, timeout, effort, redaction_keys)
     body = make_body(ep["api"], model, task["prompt"], task.get("system"), effort)
-    if task["kind"] in ("modeltrace", "behavior"):
+    if task["kind"] in ("modeltrace", "modeltrace_enroll", "behavior"):
         # 分布测试使用服务商默认 temperature，不强行设置为 0。
         body.pop("temperature", None)
-    rec = stream_request(pool, ep, body, timeout)
+        if ep["api"] == "gemini":
+            body["generationConfig"].pop("temperature", None)
+        elif ep["api"] == "bedrock":
+            body["inferenceConfig"].pop("temperature", None)
+    rec = stream_request(pool, ep, body, timeout, redaction_keys=redaction_keys)
     _grade(rec, task)
-    if task["kind"] == "modeltrace":
+    if task["kind"] in ("modeltrace", "modeltrace_enroll"):
         rec["expected_count"] = task["expected_count"]
         rec["probe_prompt"] = task["prompt"]
+        if task["kind"] == "modeltrace_enroll":
+            rec["reference"] = {"condition_id": task["condition_id"], "challenge_id": task["id"], "transport": task["transport"],
+                                "system_sha256": hashlib.sha256((task.get("system") or "").encode()).hexdigest()}
     return rec
 
 
@@ -908,7 +1110,7 @@ def cond_of(env, scenario):
     if not fp or any(k not in env or env[k] is None for k in required) or not isinstance(sampling, dict) or any(k not in sampling for k in ("temperature", "max_tokens")):
         return None
     data = {k: env[k] for k in required}
-    if env.get("method_version") in ("4", "5"):
+    if env.get("method_version") in ("4", "5", "6", "7"):
         if "concurrency" not in env or "connection_mode" not in env:
             return None
         data["concurrency"] = env["concurrency"]
@@ -937,7 +1139,26 @@ def service_of(env, label):
     if len(matches) != 1:
         return None
     e = matches[0]
-    return hashlib.sha256(json.dumps([e["base_url"], e["api"]], ensure_ascii=False).encode()).hexdigest()
+    identity = [e["base_url"], e["api"]]
+    if e["api"] == "azure":
+        if not e.get("azure_api_version") or not e.get("azure_auth"):
+            return None
+        identity.extend((e["azure_api_version"], e["azure_auth"]))
+    elif e["api"] == "bedrock":
+        if not e.get("aws_region") or "aws_profile" not in e or not e.get("aws_credential_source"):
+            return None
+        identity.extend((e["aws_region"], e["aws_profile"], e["aws_credential_source"]))
+    elif e["api"] in ("chat", "responses") and e.get("auth_mode", "bearer") != "bearer":
+        identity.append(e["auth_mode"])
+        if e["auth_mode"] == "custom":
+            if not e.get("auth_header") or "auth_prefix" not in e:
+                return None
+            identity.extend((e["auth_header"], e["auth_prefix"]))
+    if e["api"] in ("chat", "responses", "anthropic") and e.get("query_params"):
+        if not isinstance(e["query_params"], dict):
+            return None
+        identity.append(sorted(e["query_params"].items()))
+    return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
 
 
 def cond_label(env, scenario):
@@ -948,7 +1169,10 @@ def cond_label(env, scenario):
     parts = [f"强度 {eff}"]
     if scenario == "speed":
         parts.insert(0, f"提示词「{(env.get('prompt') or '')[:12]}」")
-    parts.append(f"采样 temperature={sm['temperature']}" if sm else "采样未记录（旧结果）")
+    if scenario in ("modeltrace", "modeltrace_enroll", "behavior"):
+        parts.append("采样 temperature=服务商默认")
+    else:
+        parts.append(f"采样 temperature={sm['temperature']}" if sm else "采样未记录（旧结果）")
     if env.get("context_tokens"):
         parts.append(f"背景 {env['context_tokens']}")
     return " · ".join(parts)
@@ -1104,6 +1328,7 @@ def summarize(records):
         row["slo_rate"] = round(row["slo_n"] / len(rs), 3) if len(wall_known) == len(rs) else None
         row["chars_per_second"] = dist([len(r.get("text") or "") / r["wall_total_s"] for r in good if r.get("text") and (r.get("wall_total_s") or 0) > 0])
         row["retry_n"] = sum(bool(r.get("conn_retry") or any(len(s.get("attempts", [])) > 1 for s in r.get("steps", []))) for r in rs)
+        row["uncertain_delivery_n"] = sum(bool(r.get("delivery_uncertain")) for r in rs)
         row["returned_models"] = sorted({r["returned_model"] for r in rs if isinstance(r.get("returned_model"), str)})
         row["system_fingerprints"] = sorted({r["system_fingerprint"] for r in rs if isinstance(r.get("system_fingerprint"), str)})
         shares = [max(r["first_token_s"] - r["first_event_s"], 0) / r["total_s"] for r in good
@@ -1180,7 +1405,9 @@ def conclusion(rows, fp=None):
             continue
         if sc in ("modeltrace", "behavior"):
             seg.append(f"请求成功 {sum(r['ok'] for r in rs)}/{sum(r['n'] for r in rs)}；分布结果见下方，不用于身份认证")
-        full = sorted((r for r in rs if r["total"] and r["ok"] / r["n"] >= 0.8), key=lambda r: r["total"]["median"]) if sc not in ("fingerprint", "modeltrace", "behavior") else []  # 指纹挑战的输出长度不同，不排名速度
+        if sc == "modeltrace_enroll":
+            seg.append(f"参考采集请求成功 {sum(r['ok'] for r in rs)}/{sum(r['n'] for r in rs)}；有效性以导出记录为准")
+        full = sorted((r for r in rs if r["total"] and r["ok"] / r["n"] >= 0.8), key=lambda r: r["total"]["median"]) if sc not in ("fingerprint", "modeltrace", "modeltrace_enroll", "behavior") else []  # 指纹挑战的输出长度不同，不排名速度
         if full:
             f = full[0]
             prefix = "成功请求耗时中位数最低" if len(full) > 1 else "成功请求耗时中位数"
@@ -1207,6 +1434,8 @@ def conclusion(rows, fp=None):
         for r in rs:
             if r["ok"] < r["n"]:
                 seg.append(f"{r['label']} 失败 {r['n'] - r['ok']}/{r['n']} 次：" + "，".join(f"{k}×{v}" for k, v in r["codes"].items()))
+            if r.get("uncertain_delivery_n"):
+                seg.append(f"{r['label']} 有 {r['uncertain_delivery_n']} 次送达状态未知，未自动重发")
         for r in rs:
             if r["ok"] and r["buffered_n"] * 2 >= r["ok"]:
                 seg.append(f"{r['label']} 疑似非流式（中转站攒满后一次返回），首字不可信")
@@ -1248,6 +1477,15 @@ def run_plan(plan, emit, stop):
     extra = {"handshake_s": {}, "warmup": {}}
     last_end = {}
 
+    redaction_keys = plan.get("redaction_keys")
+    if redaction_keys is None:
+        redaction_keys = [endpoint.get("api_key") for endpoint in plan["endpoints"].values()]
+
+    def redact_run_secrets(rec):
+        for secret in redaction_keys:
+            _redact_record(rec, secret)
+        return rec
+
     def pace(ep):
         wait = last_end.get(ep["name"], -1e9) + gap - time.perf_counter()
         if wait > 0:
@@ -1265,7 +1503,7 @@ def run_plan(plan, emit, stop):
                 break
             emit({"phase": "warmup", "current": f"预热 {label_of(ep, m)}"})
             pace(ep)
-            r = stream_request(pool, ep, make_body(ep["api"], m, DEFAULT_PROMPT, None, plan.get("effort", "")), timeout)
+            r = stream_request(pool, ep, make_body(ep["api"], m, DEFAULT_PROMPT, None, plan.get("effort", "")), timeout, redaction_keys=redaction_keys)
             last_end[ep["name"]] = time.perf_counter()
             extra["warmup"][label_of(ep, m)] = {"ok": r["ok"], "total_s": r["total_s"], "status": r["status"]}
     records = []
@@ -1292,7 +1530,8 @@ def run_plan(plan, emit, stop):
             if plan.get("connection_mode", "reuse") == "cold":
                 local.pool.drop(ep)
             instance = materialize_task(task, plan["seed"], rd)
-            rec = run_task(local.pool, ep, model, instance, timeout, plan.get("effort", ""))
+            rec = run_task(local.pool, ep, model, instance, timeout, plan.get("effort", ""), redaction_keys=redaction_keys)
+            redact_run_secrets(rec)
             rec["round"], rec["seq"] = rd, seq
             return rec
 
@@ -1343,7 +1582,8 @@ def run_plan(plan, emit, stop):
             instance = materialize_task(t, plan["seed"], rd + 1)
             if plan.get("connection_mode", "reuse") == "cold":
                 pool.drop(ep)
-            rec = run_task(pool, ep, m, instance, timeout, plan.get("effort", ""))
+            rec = run_task(pool, ep, m, instance, timeout, plan.get("effort", ""), redaction_keys=redaction_keys)
+            redact_run_secrets(rec)
             last_end[ep["name"]] = time.perf_counter()
             rec["round"], rec["seq"] = rd + 1, len(records) + 1
             records.append(rec)
@@ -1353,7 +1593,14 @@ def run_plan(plan, emit, stop):
 
 
 def make_env(plan, extra, meta):
-    eps = {eid: {"name": e["name"], "base_url": e["base_url"], "api": e["api"]} for eid, e in plan["endpoints"].items()}
+    eps = {eid: {"name": e["name"], "base_url": e["base_url"], "api": e["api"],
+                 **({"azure_api_version": e.get("azure_api_version", azure.DEFAULT_API_VERSION), "azure_auth": e.get("azure_auth", "api_key")} if e["api"] == "azure" else {}),
+                 **({"aws_region": e.get("aws_region", bedrock.DEFAULT_REGION), "aws_profile": e.get("aws_profile", ""),
+                     "aws_credential_source": (e.get("_aws_credentials") or {}).get("source", "unknown")} if e["api"] == "bedrock" else {}),
+                 **({"auth_mode": e.get("auth_mode", "bearer")} if e["api"] in ("chat", "responses") else {}),
+                 **({"auth_header": e.get("auth_header", ""), "auth_prefix": e.get("auth_prefix", "")} if e["api"] in ("chat", "responses") and e.get("auth_mode") == "custom" else {}),
+                 **({"query_params": e["query_params"]} if e["api"] in ("chat", "responses", "anthropic") and e.get("query_params") else {})}
+           for eid, e in plan["endpoints"].items()}
     scen = list(dict.fromkeys(t["scenario"] for t in plan["tasks"]))
     prompts = {t["id"]: hashlib.sha256((t["prompt"] + (t.get("system") or "")).encode()).hexdigest()[:12] for t in plan["tasks"]}
     scenario_fingerprints = {}
@@ -1369,15 +1616,28 @@ def make_env(plan, extra, meta):
             "sampling": {"temperature": SAMPLING["temperature"], "max_tokens": MAX_TOKENS},
             "endpoints": list(eps.values()), "models": [label_of(plan["endpoints"][e], m) for e, m in plan["models"]],
             "handshake_s": extra.get("handshake_s", {}), "warmup_results": extra.get("warmup", {}),
-            "note": "请求耗时不含连接建立；另记录含重连的端到端耗时。采样参数已固定（temperature=0、输出上限 " + str(MAX_TOKENS) + " tokens），不保证上游执行一致；重复请求可能相关，成功率区间仅供参考，正确率不计算 Wilson 区间。"}
+            "note": "请求耗时不含连接建立；另记录端到端耗时。POST 送达不确定时不自动重发。普通场景采样参数固定（temperature=0、输出上限 " + str(MAX_TOKENS) + " tokens），不保证上游执行一致；重复请求可能相关，成功率区间仅供参考，正确率不计算 Wilson 区间。"}
     if "modeltrace" in scen:
-        env["modeltrace"] = {"bank_sha256": modeltrace.BANK_SHA256, "upstream_commit": modeltrace.UPSTREAM_COMMIT,
+        artifact = plan.get("modeltrace_artifact") or modeltrace.load_bank()
+        env["modeltrace"] = {"bank_sha256": artifact["sha256"], "bank_id": plan.get("modeltrace_bank_id", "builtin"),
+                             "bank_source": artifact.get("source", "upstream"),
+                             "upstream_commit": artifact.get("upstream_commit", modeltrace.UPSTREAM_COMMIT),
                              "temperature": "provider_default", "challenges_per_round": 3}
         env["note"] += " ModelTrace 场景单独使用服务商默认 temperature。"
+    if "modeltrace_enroll" in scen:
+        env["modeltrace_enroll"] = {"suite_commit": modeltrace.UPSTREAM_COMMIT, "temperature": "provider_default", "challenges_per_model": 36}
+        env["note"] += " ModelTrace 参考库采集使用服务商默认 temperature。"
     if "behavior" in scen:
         env["behavior"] = {"version": 1, "temperature": "provider_default", "probes_per_round": len(behavior.PROBES)}
         env["note"] += " 短问题行为分布场景使用服务商默认 temperature。"
     env["condition_keys"] = {sc: cond_of(env, sc) for sc in scen}
+    redaction_keys = plan.get("redaction_keys")
+    if redaction_keys is None:
+        redaction_keys = [endpoint.get("api_key") for endpoint in plan["endpoints"].values()]
+    for secret in redaction_keys:
+        env = _redact_value(env, secret)
+        for field in ("handshake_s", "warmup_results"):
+            env[field] = _redact_value(env[field], secret, mask_keys=True)
     return env
 
 
@@ -1399,7 +1659,7 @@ def write_report(path, result):
         f.write(f"\n## {SLO_SECONDS} 秒限时完成\n\n逻辑任务开始后计算；对有判分的任务须答对，失败和超时计入分母，不含调度等待。\n\n")
         for r in rows:
             if r.get("slo_rate") is not None:
-                f.write(f"- {r['label']} [{r['scenario']}]：{r['slo_n']}/{r['n']}；重连任务 {r['retry_n']}\n")
+                f.write(f"- {r['label']} [{r['scenario']}]：{r['slo_n']}/{r['n']}；历史重试任务 {r['retry_n']}；送达状态未知 {r.get('uncertain_delivery_n', 0)}\n")
         behavior_results = result.get("behavior")
         if behavior_results:
             f.write("\n## 短问题行为分布\n\n分布距离仅供描述，没有校准后的身份判定线。\n\n")
@@ -1417,12 +1677,17 @@ def write_report(path, result):
         mt_results = result.get("modeltrace") or []
         if mt_results:
             f.write("\n## ModelTrace 候选参考\n\n")
-            f.write("分数是已收录候选之间的闭集相对权重，不是身份真实性概率；Claude 参考样本来自第三方接口。\n\n")
-            f.write(f"参考库 SHA-256：{modeltrace.BANK_SHA256}；上游提交：{modeltrace.UPSTREAM_COMMIT}。\n\n")
+            mt_env = env.get("modeltrace") or {}
+            source_note = "Claude 参考样本来自第三方接口。" if mt_env.get("bank_source", "upstream") == "upstream" else "用户导入参考库的来源与真实性未验证。"
+            f.write("分数是已收录候选之间的闭集相对权重，不是身份真实性概率；" + source_note + "\n\n")
+            f.write(f"参考库 SHA-256：{mt_env.get('bank_sha256', '未知')}；上游提交：{mt_env.get('upstream_commit') or '未记录'}。\n\n")
             for item in mt_results:
                 f.write(f"- {item['label']} 第 {item['round']} 轮：有效回答 {item['used_outputs']}/3")
                 if item['status'] == 'ranked':
                     f.write("；候选：" + "、".join(f"{r['display_name']} {r['probability']:.1%}" for r in item['results'][:3]))
+                    calibration = item.get("calibration") or {}
+                    if calibration.get("fallback") or calibration.get("cv_samples") == 0:
+                        f.write("；三题权重未校准（当前参考数据缺少交叉验证）")
                 else:
                     reasons = {"duplicate_outputs": "回答序列重复", "patterned_output": "回答呈明显规律", "too_few_valid": "有效样本不足"}
                     f.write("；" + reasons.get(item.get("reason"), "无法评分") + "，不给候选排名")
@@ -1455,6 +1720,7 @@ def main():
     ap.add_argument("--endpoint", required=True, help="接口名称")
     ap.add_argument("--model", action="append", help="模型，可多次；默认该接口全部")
     ap.add_argument("--scenario", action="append", choices=list(SCENARIOS), help="场景，可多次；默认 speed")
+    ap.add_argument("--modeltrace-bank", default="builtin", help="ModelTrace 参考库 ID：builtin 或已导入库的 SHA-256")
     ap.add_argument("--prompt", default=DEFAULT_PROMPT)
     ap.add_argument("--context", type=int, default=0, choices=CONTEXT_CHOICES)
     ap.add_argument("--rounds", type=int, default=2)
@@ -1471,7 +1737,7 @@ def main():
     if not ep:
         sys.exit("找不到接口：" + a.endpoint)
     params = {"selection": [{"endpoint": ep["id"], "models": a.model or ep["models"]}], "scenarios": a.scenario or ["speed"], "prompt": a.prompt,
-              "rounds": a.rounds, "timeout": a.timeout, "context": a.context, "gap": a.gap, "warmup": not a.no_warmup, "name": a.name or "", "effort": a.effort, "concurrency": a.concurrency, "connection_mode": a.connection_mode, "seed": a.seed}
+              "rounds": a.rounds, "timeout": a.timeout, "context": a.context, "gap": a.gap, "warmup": not a.no_warmup, "name": a.name or "", "effort": a.effort, "concurrency": a.concurrency, "connection_mode": a.connection_mode, "seed": a.seed, "modeltrace_bank": a.modeltrace_bank}
     from . import server
     params = server.validate(params)
     res = store.execute(params, lambda u: print(u.get("current", ""), flush=True) if u.get("current") else None, threading.Event())

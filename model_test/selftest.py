@@ -8,6 +8,7 @@ quiz-good / quiz-bad（题库全对 / 全错）、tool-ok（两步工具调用�
 import json
 import random
 import re
+import socket
 import threading
 import time
 import zlib
@@ -229,41 +230,37 @@ def run_checks():
     check("非流式 JSON 响应（中转站攒满返回）", nonstream("responses"))
     check("非流式 JSON 响应（chat）", nonstream("chat"))
 
-    def conn_retry():
-        """服务端每服务一个请求就关连接：下一次复用这条连接必然失败。
-        平台应换新连接重发（标 conn_retry）而不是把这次记成失败——keep-alive 超时后的连接复用是基础设施问题。"""
-        last = ""
-        for _ in range(3):  # 时序敏感：偶发服务端线程没来得及关连接，重试几次再判定
-            hits = {"n": 0}
+    def no_ambiguous_retry():
+        """服务端收到第二个 POST 后断开：不可自动重发可能已计费的请求。"""
+        hits = {"n": 0}
 
-            class CloseAfterOne(Fake):
-                daemon_threads = True
+        class DropAfterReceipt(Fake):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                hits["n"] += 1
+                if hits["n"] == 2:
+                    self.close_connection = True
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    self.connection.close()
+                    return
+                self._json(200, {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "好"}]}]})
 
-                def do_POST(self):
-                    Fake.do_POST(self)
-                    hits["n"] += 1
-                    self.close_connection = True  # 每服务一个请求就关连接
-
-            srv2 = ThreadingHTTPServer(("127.0.0.1", 0), CloseAfterOne)
-            srv2.daemon_threads = True
-            threading.Thread(target=srv2.serve_forever, daemon=True).start()
-            try:
-                ep2 = fake_endpoint(f"http://127.0.0.1:{srv2.server_address[1]}")
-                p2 = core.Pool()
-                body = core.make_body("responses", "delay-0.5", "x")
-                rs = [core.stream_request(p2, ep2, body, 20) for _ in range(3)]
-                p2.close()
-                retried = sum(1 for r in rs if r.get("conn_retry"))
-                last = "服务端每请求后关连接：3 次请求 ok=" + str([r["ok"] for r in rs]) + "，其中 " + str(retried) + \
-                       " 次标了 conn_retry（复用连接失败→换新连接重发，不计入失败率）"
-                if all(r["ok"] for r in rs) and retried >= 1:
-                    return True, last
-                last += "；错误：" + "；".join(r["error"] for r in rs if r["error"])[:120]
-            finally:
-                srv2.shutdown()
-                srv2.server_close()
-        return False, last
-    check("连接 keep-alive 竞态：换连接重发而非记失败", conn_retry)
+        srv2 = ThreadingHTTPServer(("127.0.0.1", 0), DropAfterReceipt)
+        srv2.daemon_threads = True
+        threading.Thread(target=srv2.serve_forever, daemon=True).start()
+        p2 = core.Pool()
+        try:
+            ep2 = fake_endpoint(f"http://127.0.0.1:{srv2.server_address[1]}")
+            body = core.make_body("responses", "fixture", "x")
+            first = core.stream_request(p2, ep2, body, 20)
+            second = core.stream_request(p2, ep2, body, 20)
+            ok = first["ok"] and not second["ok"] and second.get("delivery_uncertain") and hits["n"] == 2
+            return ok, f"两次逻辑请求共收到 {hits['n']} 次 POST；第二次送达状态未知={second.get('delivery_uncertain', False)}"
+        finally:
+            p2.close()
+            srv2.shutdown()
+            srv2.server_close()
+    check("连接中断：不重发可能已计费的请求", no_ambiguous_retry)
 
     def quiz(api):
         def f():

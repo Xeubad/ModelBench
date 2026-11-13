@@ -183,34 +183,30 @@ class NonStreamAndRetry(unittest.TestCase):
             self.assertTrue(r["non_stream"] and r["buffered"], api)
             self.assertEqual(r["tps_overall"] is not None or r["tps"] is None, True, api)  # 一次性返回算不出分段速度
 
-    def test_conn_retry_on_reused_connection(self):
-        hits = {"n": 0}
-
-        class CloseAfterOne(selftest.Fake):
-            def do_POST(self):
-                selftest.Fake.do_POST(self)
-                hits["n"] += 1
-                self.close_connection = True
-
-        srv = server.ThreadingHTTPServer(("127.0.0.1", 0), CloseAfterOne)
+    def test_connection_reopens_for_next_task_after_uncertain_delivery(self):
+        from tests.test_transport_safety import SafetyFixture
+        srv = server.ThreadingHTTPServer(("127.0.0.1", 0), SafetyFixture)
         srv.daemon_threads = True
+        srv.received, srv.payloads = 0, []
         threading.Thread(target=srv.serve_forever, daemon=True).start()
+        pool = core.Pool()
         try:
-            ep = selftest.fake_endpoint(f"http://127.0.0.1:{srv.server_address[1]}")
-            pool = core.Pool()
-            body = core.make_body("responses", "delay-0.5", "x")
-            rs = [core.stream_request(pool, ep, body, 20) for _ in range(3)]
-            pool.close()
+            ep = {"name": "fake", "base_url": f"http://127.0.0.1:{srv.server_address[1]}", "api_key": "fixture-sensitive-key", "api": "chat"}
+            body = core.make_body("chat", "disconnect", "x")
+            first = core.stream_request(pool, ep, body, 20)
+            second = core.stream_request(pool, ep, body, 20)
+            self.assertTrue(first["ok"])
+            self.assertFalse(second["ok"])
+            self.assertTrue(second["delivery_uncertain"])
+            self.assertEqual(srv.received, 2)
+            third = core.stream_request(pool, ep, body, 20)
+            self.assertTrue(third["ok"])
+            self.assertFalse(third["reused"])
+            self.assertEqual(srv.received, 3)
         finally:
+            pool.close()
             srv.shutdown()
             srv.server_close()
-        self.assertTrue(all(r["ok"] for r in rs), "keep-alive 竞态不该记为失败：" + str([r["error"] for r in rs]))
-        self.assertTrue(any(r.get("conn_retry") for r in rs[1:]), "复用连接失败应标 conn_retry 并换连接重发")
-        retry = next(r for r in rs if r.get("conn_retry"))
-        self.assertEqual(len(retry["attempts"]), 2)
-        self.assertTrue(retry["attempts"][0]["error"])
-        self.assertGreaterEqual(retry["wall_total_s"], retry["total_s"])
-        self.assertGreater(hits["n"], len(rs) - 1, "重发应多打一次请求")
 
     def test_queue_time_separated_from_first_token(self):
         class SlowFirst(selftest.Fake):
@@ -344,9 +340,9 @@ class Store(unittest.TestCase):
         store.upsert_endpoint({"id": e["id"], "name": "x2", "base_url": "https://b.com/v1", "api": "chat", "models": ["m1", "m2", "m1"]})  # 密钥留空 = 不变
         cur = store.get_endpoint(e["id"])
         self.assertEqual((cur["name"], cur["api_key"], cur["models"]), ("x2", "sk-secret-1234567890", ["m1", "m2"]))
-        with self.assertRaises(ValueError):
-            store.upsert_endpoint({"name": "y", "base_url": "https://a.com"})  # 新增必须有密钥
-        store.upsert_endpoint({"name": "y", "base_url": "https://a.com", "api_key": "k1"})
+        keyless = store.upsert_endpoint({"name": "y", "base_url": "https://a.com"})  # 本地兼容服务可不使用密钥
+        self.assertEqual(keyless["key_hint"], "未设置")
+        store.upsert_endpoint({"id": keyless["id"], "name": "y", "base_url": "https://a.com", "api_key": "k1"})
         with self.assertRaises(ValueError):
             store.upsert_endpoint({"name": "y", "base_url": "https://a.com", "api_key": "k1"})  # 重名
         store.delete_endpoint(e["id"])
@@ -558,7 +554,7 @@ class Dashboard(unittest.TestCase):
     def test_every_referenced_id_exists(self):
         ids = set(self.re.findall(r'\bid="([^"]+)"', self.markup))
         used = {u for u in self.re.findall(r'\$\("([^"]+)"\)', self.js) if not u.startswith(("tab-", "sc_"))}
-        dynamic = {"setRounds"}  # 由脚本生成的元素（样本不足提示里的按钮），必须在脚本里真的创建
+        dynamic = {"setRounds", "meowReportJson"}  # 脚本动态生成的元素必须真的创建
         for d in dynamic:
             self.assertIn(f'id="{d}"', self.js, f"动态元素 {d} 没有在脚本里创建")
         self.assertEqual(sorted(used - ids - dynamic), [])
@@ -786,7 +782,7 @@ class FairnessAndValidity(unittest.TestCase):
         sm = res["env"].get("sampling")
         self.assertIsNotNone(sm, "环境快照未记录采样参数")
         self.assertEqual((sm["temperature"], sm["max_tokens"]), (0, core.MAX_TOKENS))
-        self.assertIn("采样参数已固定", res["env"]["note"])
+        self.assertIn("普通场景采样参数固定", res["env"]["note"])
 
     def test_conclusion_warns_when_output_length_differs(self):
         def rec(label, total, tout, tps):

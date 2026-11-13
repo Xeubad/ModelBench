@@ -1,5 +1,7 @@
 {
   "_说明": "只需写想改的项，其余沿用默认；路径相对于 ModelBench 目录，~ 展开为用户目录；改完重启 start.sh 生效。server.bind_hosts 第一个必须是本机；需要局域网/组网访问时再追加自己的地址（如 \"10.x.x.x\"），绑定失败会自动跳过。完整说明见 model_test/config.py",
+  "_历史兼容": "legacy_results_dir 用于读取早期历史结果，openclaw_config 只在主动导入时读取；这两个路径可以不存在，平台不依赖 OpenClaw。",
+
   "server": {
     "port": 18888,
     "bind_hosts": [

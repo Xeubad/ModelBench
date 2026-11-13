@@ -3,6 +3,7 @@
   serve [--port N] [--open]   启动网页（默认命令；也可用 ./start.sh）
   run --endpoint 名称 ...      命令行跑一次测试（参数见 run --help）
   selftest                    仪器自检（本机假服务，验证平台自己测得准）
+  train-bank --train ...      从本地采集 JSONL 训练参考库（可选 NumPy）
   test [unittest 参数]         单元测试
 """
 import os
@@ -25,6 +26,13 @@ def main(argv):
     elif cmd == "selftest":
         from . import selftest
         selftest.main()
+    elif cmd == "train-bank":
+        try:
+            from . import modeltrace_training
+            modeltrace_training.main(rest)
+        except (RuntimeError, ValueError, OSError) as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
     elif cmd == "test":
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         suite = unittest.defaultTestLoader.discover(os.path.join(root, "tests"), top_level_dir=root)

@@ -220,6 +220,8 @@ th.sortable:hover{color:var(--amber)}
 .identity-intro{padding:26px 28px}.identity-kicker{color:var(--amber);font:600 11px var(--mono);letter-spacing:.16em}
 .identity-title{margin:12px 0 8px;font-size:19px;letter-spacing:.04em;color:var(--ink)}
 .identity-title::before{display:none}.identity-intro p{max-width:70ch;color:var(--ink2)}
+.identity-intro a{color:var(--amber2);text-underline-offset:3px}.identity-intro a:hover{color:var(--ink)}
+.migration{margin-top:9px;font-size:11px;color:var(--mute)}.migration summary{cursor:pointer;color:var(--ink2)}.migration .row{margin-top:6px}
 .identity-limit{padding:12px 15px;border-left:3px solid var(--amber);background:var(--amber-dim);color:var(--amber2);line-height:1.7}
 .identity-challenge{margin-top:16px}.identity-challenge h3{display:flex;align-items:center;gap:12px}
 .identity-challenge pre{padding:14px;background:var(--bg);border:1px solid var(--line);line-height:1.8;word-break:break-word}
@@ -252,20 +254,29 @@ th.sortable:hover{color:var(--amber)}
   <div class="scroll">
     <h1><span class="wordmark">ModelBench</span><small id="ver"></small></h1>
 
-    <h2>接口 <span class="sp"></span><button class="ghost sm" id="addEp">＋ 添加</button><button class="ghost sm" id="impEp" title="只读取 OpenClaw 配置里的供应商，复制到本平台">导入</button></h2>
+    <h2>模型接口 <span class="sp"></span><button class="ghost sm" id="addEp">＋ 添加</button></h2>
+    <div class="mute" style="font-size:11px;line-height:1.7">连接 OpenAI 兼容接口、Anthropic、Gemini、Azure、Bedrock 或本地模型。</div>
     <div id="epForm" class="form hidden">
       <input type="hidden" id="f_id">
-      <label class="f">名称</label><input type="text" id="f_name" placeholder="例如 codeapi">
-      <label class="f">接口地址 Base URL</label><input type="text" id="f_url" placeholder="https://xxx.com 或 https://xxx.com/v1">
-      <label class="f">密钥 API Key <span id="f_keyhint" class="mute"></span></label><input type="password" id="f_key" autocomplete="off" placeholder="sk-…">
-      <label class="f">接口类型</label>
-      <select id="f_api"><option value="auto">自动探测</option><option value="responses">responses（/v1/responses）</option><option value="chat">chat（/v1/chat/completions）</option><option value="anthropic">Anthropic Messages（/v1/messages）</option></select>
-      <label class="f">模型（每行一个，保存后自动探测并覆盖；也可手填）</label><textarea id="f_models"></textarea>
-      <div class="row"><button id="f_save">保存并探测</button><button class="ghost" id="f_cancel">取消</button></div>
+      <label class="f" for="f_name">名称</label><input type="text" id="f_name" placeholder="例如 本地模型 / 我的接口">
+      <label class="f" for="f_url">接口地址 Base URL</label><input type="text" id="f_url" placeholder="https://api.example.com/v1 或本地服务地址">
+      <label class="f" for="f_api">接口协议</label>
+      <select id="f_api"><option value="auto">自动探测（OpenAI / Anthropic）</option><option value="chat">OpenAI 兼容 Chat Completions</option><option value="responses">OpenAI 兼容 Responses</option><option value="anthropic">Anthropic Messages</option><option value="gemini">Google Gemini 原生</option><option value="azure">Azure OpenAI 部署式</option><option value="bedrock">AWS Bedrock ConverseStream</option></select>
+      <div id="f_keyBox"><label class="f" for="f_key">密钥 API Key / Token <span id="f_keyhint" class="mute"></span></label><input type="password" id="f_key" autocomplete="off" placeholder="无密钥的本地服务可留空">
+        <div class="chk hidden" id="f_clearBox"><input type="checkbox" id="f_clear_key"><label for="f_clear_key" style="font-size:11.5px;color:var(--ink2)">清除已保存的密钥</label></div></div>
+      <div id="f_authBox"><label class="f" for="f_auth_mode">兼容接口鉴权头</label><select id="f_auth_mode"><option value="bearer">Authorization: Bearer</option><option value="api-key">api-key</option><option value="x-api-key">x-api-key</option><option value="custom">自定义鉴权头</option></select>
+        <div id="f_customAuthBox" class="hidden"><label class="f" for="f_auth_header">鉴权头名称</label><input id="f_auth_header" placeholder="例如 X-Service-Token"><label class="f" for="f_auth_prefix">密钥前缀（可选，保留空格）</label><input id="f_auth_prefix" placeholder="例如 ApiKey 后跟空格"></div></div>
+      <div id="f_azureBox" class="hidden"><label class="f" for="f_azure_version">Azure API 版本</label><input id="f_azure_version" value="2024-10-21" placeholder="例如 2024-10-21"><label class="f" for="f_azure_auth">Azure 鉴权</label><select id="f_azure_auth"><option value="api_key">API Key（api-key 头）</option><option value="bearer">Microsoft Entra Bearer Token</option></select></div>
+      <div id="f_awsBox" class="hidden"><label class="f" for="f_aws_region">AWS 区域</label><input id="f_aws_region" value="us-east-1" placeholder="例如 us-east-1"><label class="f" for="f_aws_profile">AWS Profile（可选）</label><input id="f_aws_profile" placeholder="留空使用环境变量或默认 Profile"><div class="mute" style="font-size:11px;margin-top:6px;line-height:1.65">凭据从运行 ModelBench 的环境变量或 AWS 共享凭据文件读取，不在网页填写。SSO / 角色凭据需先导出为环境变量。</div></div>
+      <details id="f_queryBox" class="migration"><summary>高级：非密钥查询参数</summary><label class="f" for="f_query">每行一个 name=value</label><textarea id="f_query" placeholder="例如 api-version=2025-01-01"></textarea><div>参数会保存在配置和测试快照中；密钥请填在上方密钥栏。</div></details>
+      <label class="f" for="f_models" id="f_modelsLabel">模型 ID（每行一个，或通过探测追加）</label><textarea id="f_models"></textarea>
+      <div class="row"><button id="f_save">保存接口</button><button class="ghost" id="f_saveProbe">保存并探测</button><button class="ghost" id="f_cancel">取消</button></div>
+      <div class="mute" id="f_probeNote" style="font-size:11px;margin-top:7px">保存不会访问接口；探测可能发送模型请求并产生费用。</div>
       <div class="msg" id="f_msg"></div>
     </div>
     <div id="eps" class="mute">加载中…</div>
     <div class="msg" id="epMsg"></div>
+    <details class="migration"><summary>可选：从其他工具迁移</summary><div>读取本机 OpenClaw 的供应商配置；同名接口会更新。</div><div class="row"><button class="ghost sm" id="impEp">从 OpenClaw 导入</button></div></details>
 
     <h2>测试场景</h2>
     <div id="scen"></div>
@@ -291,11 +302,12 @@ th.sortable:hover{color:var(--amber)}
     </div>
     <div class="row"><span style="font-size:11.5px;font-family:var(--mono);color:var(--ink2)">推理强度</span>
       <select id="effort" style="width:auto" title="不同模型对推理强度参数的支持和含义可能不同，统一参数不保证相同计算预算"><option value="">不指定（模型默认）</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></div>
+    <div id="mtBankBox" class="hidden"><label class="f" for="mtBank">ModelTrace 参考库</label><select id="mtBank"><option value="builtin">ModelTrace 内置参考库</option></select><div class="mute" style="font-size:11px;margin-top:4px">在「手动归因」中导入自建参考库；结果保存所用库的哈希。</div></div>
     <div class="chk"><input type="checkbox" id="warmup" checked><label for="warmup" style="font-size:11.5px;color:var(--ink2)">每个模型先预热一次（不计入结果）</label></div>
     <div class="chk"><input type="checkbox" id="useName"><label for="useName" style="font-size:11.5px;color:var(--ink2)">自定义测试名称（方便以后按名字找文件）</label></div>
     <input type="text" id="runName" class="hidden" maxlength="30" placeholder="例如 AB平台对比（中文、字母、数字、-、_）">
     <div class="msg mute hidden" id="nameHint"></div>
-    <div class="mute" style="font-size:11px;margin-top:7px;line-height:1.7">每轮随机安排逻辑任务；并发时按任务开始间隔，串行按任务结束间隔。工具第二步与连接重试不受该间隔约束，不能保证避免限流。</div>
+    <div class="mute" style="font-size:11px;margin-top:7px;line-height:1.7">每轮随机安排逻辑任务；并发时按任务开始间隔，串行按任务结束间隔。工具第二步不受该间隔约束，不能保证避免限流。</div>
 
     <h2>局域网访问 <span class="sp"></span><span class="tag" id="lanState">关闭</span></h2>
     <div class="chk"><input type="checkbox" id="lanToggle"><label for="lanToggle" style="font-size:11.5px;color:var(--ink2)">允许同一局域网的其他设备访问（手机 / 平板 / 另一台电脑）</label></div>
@@ -304,7 +316,7 @@ th.sortable:hover{color:var(--amber)}
       <code id="lanUrl" class="lan-url"></code>
       <div class="row" style="margin-top:7px"><button class="ghost sm" id="lanCopy">复制地址</button><span class="mute" id="lanHost" style="font-size:11px"></span></div>
       <div class="warnbox" style="font-size:11.5px;padding:9px 12px;margin:8px 0 0;line-height:1.75">
-        ⚠ 页面没有登录：拿到这个地址的人在它有效期内都能使用你保存的接口密钥发请求。
+        ⚠ 页面没有登录：拿到这个地址的人在它有效期内可以使用已保存的接口密钥、本机 AWS 环境或 Profile 凭据发请求。
         不用时请关闭开关；令牌只在本次运行有效，重启即失效。</div>
     </div>
     <div class="msg" id="lanMsg"></div>
@@ -317,7 +329,7 @@ th.sortable:hover{color:var(--amber)}
 </aside>
 
 <main class="right">
-  <div class="tabs"><button data-tab="result" class="on">结果</button><button data-tab="history">历史与趋势</button><button data-tab="compare">对比</button><button data-tab="merge">合并检验</button><button data-tab="identity">手动归因</button><button data-tab="selftest">仪器自检</button></div>
+  <div class="tabs"><button data-tab="result" class="on">结果</button><button data-tab="history">历史与趋势</button><button data-tab="compare">对比</button><button data-tab="merge">合并检验</button><button data-tab="identity">手动归因</button><button data-tab="meow">meow · 独立</button><button data-tab="selftest">仪器自检</button></div>
 
   <div id="tab-result">
     <div id="empty" class="panel mute">还没有结果。左侧选好接口、场景和模型，点“开始测试”；或到“历史与趋势”里打开以前的结果。</div>
@@ -325,6 +337,7 @@ th.sortable:hover{color:var(--amber)}
       <div class="row" style="margin-top:0">
         <b id="resTitle" style="font-size:15px;font-family:var(--mono);letter-spacing:.3px"></b>
         <a id="resDl" class="btn-dl hidden" href="#" download title="下载这一次测试的原始数据（含全部流事件）">↓ 下载原始数据</a>
+        <a id="refDl" class="btn-dl hidden" href="#" download title="下载本轮参考库采集记录，可用于本地训练">↓ 导出参考样本 JSONL</a>
       </div>
       <div class="concl" id="concl"></div>
       <div class="warnbox hidden" id="sampleHint"></div>
@@ -378,12 +391,41 @@ th.sortable:hover{color:var(--amber)}
       <div class="identity-kicker">MODELTRACE / MANUAL</div>
       <h2 class="identity-title">手动分析模型输出</h2>
       <p>将三条挑战分别发送给同一个待测模型，再将完整回答粘贴回来。本页的分析在本机完成。</p>
-      <div class="identity-limit">结果只在参考库收录的候选中排序。未知模型也会被排到最接近的候选；Claude 参考样本来自第三方接口，分数不能认证模型身份。</div>
+      <div class="identity-limit">结果只在所选参考库的候选中排序，未知模型也会被排到已有候选；内置库的 Claude 参考样本来自第三方接口，分数不能认证模型身份。</div>
       <div class="row"><button id="mtNew" class="ghost">生成三条挑战</button><span class="mute" id="mtManualMsg" aria-live="polite"></span></div>
+    </div>
+    <div class="panel"><h3 style="margin-top:0">参考库</h3>
+      <label class="f" for="mtManualBank">选择分析所用参考库</label><select id="mtManualBank"><option value="builtin">ModelTrace 内置参考库</option></select>
+      <div class="row"><input id="mtBankFile" type="file" accept=".json,application/json" style="width:auto;max-width:100%"><button id="mtImportBank" class="ghost">导入参考库</button></div>
+      <div class="mute" id="mtBankMsg" style="font-size:11.5px;margin-top:6px;line-height:1.7">支持导入 ModelTrace 统一库格式。自建库需自行核实来源；采集与训练步骤见 README。</div>
     </div>
     <div id="mtManualInputs"></div>
     <div class="row"><button id="mtAnalyze" disabled>分析三份回答</button></div>
     <div id="mtManualResult"></div>
+  </div>
+
+  <div id="tab-meow" class="hidden">
+    <div class="panel identity-intro">
+      <div class="identity-kicker">LOCAL BRIDGE / INDEPENDENT PROCESS</div>
+      <h2 class="identity-title">连接独立的 meow 检测器</h2>
+      <p>先自行安装并启动 <a href="https://github.com/chen-006/meow-llm-detector" target="_blank" rel="noopener noreferrer">meow LLM Detector</a>，在其页面配置接口和基准包。ModelBench 只连接本机端口，使用 meow 自己保存的接口凭据。</p>
+      <div class="identity-limit">meow 及其基准采用独立的 PolyForm Noncommercial 许可；使用前请核对其许可。检测会调用所选模型接口并产生费用。结果来自 meow，仅作模型身份线索。</div>
+      <div class="row"><label for="meowPort">本机端口</label><input type="number" id="meowPort" value="8765" min="1" max="65535"><button id="meowConnect" class="ghost">连接检测器</button><span id="meowStatus" class="mute" aria-live="polite"></span></div>
+    </div>
+    <div id="meowSetup" class="panel hidden">
+      <h3 style="margin-top:0">配置单次检测</h3>
+      <label class="f" for="meowPackage">meow 已安装的基准包</label><select id="meowPackage"></select>
+      <label class="f" for="meowEndpoint">meow 已保存凭据的接口</label><select id="meowEndpoint"></select>
+      <label class="f" for="meowClaimed">申报模型（基准候选）</label><select id="meowClaimed"></select>
+      <label class="f" for="meowRequest">实际请求模型</label><input id="meowRequest" type="text" maxlength="256" placeholder="例如接口中的模型别名">
+      <div class="row"><label for="meowTier">档位</label><select id="meowTier" style="width:auto"><option value="low">快速</option><option value="medium">标准</option><option value="high">深入</option></select><label for="meowWorkers">并发</label><input type="number" id="meowWorkers" value="1" min="1" max="4"><label for="meowRetries">额外重试预算</label><input type="number" id="meowRetries" value="0" min="0" max="1000"></div>
+      <div class="row"><button id="meowEstimate" class="ghost">估算请求数</button><button id="meowStart" disabled>启动独立检测</button></div>
+      <div id="meowEstimateMsg" class="mute msg" aria-live="polite">先估算请求数；默认不允许额外重试。</div>
+    </div>
+    <div class="panel"><h3 style="margin-top:0">meow 报告</h3>
+      <div class="row"><input type="text" id="meowSession" placeholder="会话 ID（启动后自动填写）" style="max-width:350px"><button id="meowRefresh" class="ghost">读取报告</button><button id="meowStop" class="ghost">停止检测</button></div>
+      <div id="meowReportMsg" class="mute msg" aria-live="polite">报告与原始数据由独立 meow 保存；这里展示摘要和基准哈希。</div><div id="meowReport"></div>
+    </div>
   </div>
 
   <div id="tab-selftest" class="hidden">
@@ -421,7 +463,7 @@ const store = {get(k, d) { try { const v = localStorage.getItem("mt2." + k); ret
 /* ---------------- 标签页 ---------------- */
 function tab(name) {
   document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === name));
-  ["result", "history", "compare", "merge", "identity", "selftest"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== name));
+  ["result", "history", "compare", "merge", "identity", "meow", "selftest"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== name));
   if (name === "history") loadHistory();
   if (name === "identity" && !mtManualChallenges.length) loadManualChallenges();
 }
@@ -431,34 +473,87 @@ document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => tab(b.d
 function renderEndpoints() {
   $("eps").innerHTML = endpoints.length ? endpoints.map(e => `<div class="ep" data-id="${e.id}">
     <div><span class="nm">${esc(e.name)}</span> <span class="tag">${esc(e.api === "auto" ? "自动→" + (e.api_detected || "未探测") : e.api)}</span><span class="tag">${e.models.length} 个模型</span></div>
-    <div class="url">${esc(e.base_url)} · 密钥 ${esc(e.key_hint)}${e.models_checked_at ? " · 探测于 " + esc(e.models_checked_at.replace("T", " ")) : ""}</div>
-    <div class="btns"><button class="ghost sm" data-act="probe">探测模型</button><button class="ghost sm" data-act="edit">修改</button><button class="danger sm" data-act="del">删除</button></div></div>`).join("")
-    : "<span class='mute'>还没有接口。点“＋ 添加”填写地址和密钥，或从 OpenClaw 导入。</span>";
+    <div class="url">${esc(e.base_url)} · ${e.api === "bedrock" ? `AWS ${esc(e.aws_region || "us-east-1")} · ${e.aws_profile ? "Profile " + esc(e.aws_profile) : "环境 / 默认 Profile"}` : "密钥 " + esc(e.key_hint)}${e.models_checked_at ? " · 探测于 " + esc(e.models_checked_at.replace("T", " ")) : ""}</div>
+    <div class="btns">${e.api === "azure" ? "" : '<button class="ghost sm" data-act="probe">探测模型</button>'}<button class="ghost sm" data-act="edit">修改</button><button class="danger sm" data-act="del">删除</button></div></div>`).join("")
+    : "<span class='mute'>还没有模型接口。点“＋ 添加”填写服务地址，选择协议并添加模型。</span>";
   $("eps").querySelectorAll("button[data-act]").forEach(b => b.onclick = () => epAction(b.closest(".ep").dataset.id, b.dataset.act, b));
   renderModels();
 }
 async function loadEndpoints() { endpoints = (await api("/api/endpoints")).endpoints; renderEndpoints(); }
+let suggestedEndpoint = "";
+function syncEndpointForm(suggest = false) {
+  const kind = $("f_api").value, isAws = kind === "bedrock", isAzure = kind === "azure";
+  $("f_keyBox").classList.toggle("hidden", isAws);
+  const compatible = ["auto", "chat", "responses"].includes(kind);
+  $("f_authBox").classList.toggle("hidden", !compatible);
+  $("f_customAuthBox").classList.toggle("hidden", !compatible || $("f_auth_mode").value !== "custom");
+  $("f_queryBox").classList.toggle("hidden", !["auto", "chat", "responses", "anthropic"].includes(kind));
+  $("f_azureBox").classList.toggle("hidden", !isAzure); $("f_awsBox").classList.toggle("hidden", !isAws);
+  $("f_saveProbe").classList.toggle("hidden", isAzure);
+  $("f_modelsLabel").textContent = isAzure ? "部署名称（每行一个，手工填写）" : isAws ? "模型 ID 或推理配置 ARN（每行一个）" : "模型 ID（每行一个，或通过探测追加）";
+  $("f_probeNote").textContent = isAzure ? "Azure 需手工填写部署名称；保存不会访问接口。" : "保存不会访问接口；探测可能发送模型请求并产生费用。";
+  $("f_url").placeholder = isAzure ? "https://资源名称.openai.azure.com" : isAws ? "https://bedrock-runtime.us-east-1.amazonaws.com" : kind === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : "https://api.example.com/v1 或本地服务地址";
+  if (suggest && !$("f_url").value.trim()) {
+    const region = $("f_aws_region").value.trim() || "us-east-1";
+    suggestedEndpoint = kind === "gemini" ? "https://generativelanguage.googleapis.com/v1beta" : isAws ? `https://bedrock-runtime.${region}.amazonaws.com${region.startsWith("cn-") ? ".cn" : ""}` : "";
+    if (suggestedEndpoint) $("f_url").value = suggestedEndpoint;
+  }
+}
 function showForm(ep) {
   $("epForm").classList.remove("hidden"); $("f_msg").textContent = "";
   $("f_id").value = ep ? ep.id : ""; $("f_name").value = ep ? ep.name : ""; $("f_url").value = ep ? ep.base_url : "";
-  $("f_key").value = ""; $("f_keyhint").textContent = ep ? `（留空表示不变，当前 ${ep.key_hint}）` : "";
+  $("f_key").value = ""; $("f_key").disabled = false; $("f_clear_key").checked = false;
+  $("f_keyhint").textContent = ep && ep.key_hint !== "未设置" ? `（留空表示不变，当前 ${ep.key_hint}）` : "（可选）";
+  $("f_clearBox").classList.toggle("hidden", !ep || ep.key_hint === "未设置");
   $("f_api").value = ep ? ep.api : "auto"; $("f_models").value = ep ? ep.models.join("\n") : "";
+  $("f_auth_mode").value = ep?.auth_mode || "bearer"; $("f_auth_header").value = ep?.auth_header || ""; $("f_auth_prefix").value = ep?.auth_prefix || "";
+  $("f_query").value = Object.entries(ep?.query_params || {}).map(([key, value]) => key + "=" + value).join("\n");
+  $("f_azure_version").value = ep?.azure_api_version || "2024-10-21"; $("f_azure_auth").value = ep?.azure_auth || "api_key";
+  $("f_aws_region").value = ep?.aws_region || "us-east-1"; $("f_aws_profile").value = ep?.aws_profile || ""; suggestedEndpoint = ""; syncEndpointForm();
   $("f_name").focus();
 }
-async function saveEp() {
+async function saveEp(shouldProbe) {
   const body = {id: $("f_id").value || undefined, name: $("f_name").value, base_url: $("f_url").value, api: $("f_api").value,
                 models: $("f_models").value.split("\n").map(s => s.trim()).filter(Boolean)};
-  if ($("f_key").value) body.api_key = $("f_key").value;
-  $("f_save").disabled = true; $("f_msg").className = "msg mute"; $("f_msg").textContent = "保存中…";
+  if (body.api !== "bedrock" && $("f_key").value) body.api_key = $("f_key").value;
+  if (body.api !== "bedrock" && $("f_clear_key").checked) body.clear_api_key = true;
+  if (["auto", "chat", "responses"].includes(body.api)) {
+    body.auth_mode = $("f_auth_mode").value;
+    if (body.auth_mode === "custom") { body.auth_header = $("f_auth_header").value.trim(); body.auth_prefix = $("f_auth_prefix").value; }
+  }
+  if (["auto", "chat", "responses", "anthropic"].includes(body.api)) {
+    const query = Object.create(null), names = new Set();
+    for (const line of $("f_query").value.split("\n")) {
+      if (!line.trim()) continue;
+      const split = line.indexOf("="), name = split >= 0 ? line.slice(0, split).trim() : "";
+      if (!name || names.has(name.toLowerCase())) { $("f_msg").className = "msg err"; $("f_msg").textContent = "查询参数须为不重复的 name=value，每行一个。"; return; }
+      names.add(name.toLowerCase()); query[name] = line.slice(split + 1).trim();
+    }
+    body.query_params = query;
+  }
+  if (body.api === "azure") { body.azure_api_version = $("f_azure_version").value.trim(); body.azure_auth = $("f_azure_auth").value; }
+  if (body.api === "bedrock") { body.aws_region = $("f_aws_region").value.trim(); body.aws_profile = $("f_aws_profile").value.trim(); }
+  $("f_save").disabled = $("f_saveProbe").disabled = true; $("f_msg").className = "msg mute"; $("f_msg").textContent = "保存中…";
+  let endpoint = null;
   try {
-    const {endpoint} = await api("/api/endpoints", body);
-    $("f_msg").textContent = "已保存，正在探测模型列表和接口类型…";
-    const r = await api("/api/endpoints/probe", {id: endpoint.id});
-    $("epForm").classList.add("hidden");
+    ({endpoint} = await api("/api/endpoints", body));
+    $("f_id").value = endpoint.id; $("f_key").value = "";
     await loadEndpoints();
-    probeMsg(endpoint.name, r);
-  } catch (e) { $("f_msg").className = "msg err"; $("f_msg").textContent = e.message; await loadEndpoints().catch(() => {}); }
-  $("f_save").disabled = false;
+    if (shouldProbe) {
+      $("f_msg").textContent = "已保存，正在探测模型列表和接口类型…";
+      const result = await api("/api/endpoints/probe", {id: endpoint.id});
+      await loadEndpoints(); probeMsg(endpoint.name, result);
+    } else {
+      $("epMsg").className = "msg ok";
+      $("epMsg").textContent = endpoint.api === "auto" && !endpoint.api_detected
+        ? `${endpoint.name} 已保存；运行前请探测或选择具体协议。` : `${endpoint.name} 已保存。`;
+    }
+    $("epForm").classList.add("hidden");
+  } catch (e) {
+    $("f_msg").className = "msg err";
+    $("f_msg").textContent = endpoint ? "接口已保存，但后续操作失败：" + e.message : e.message;
+    await loadEndpoints().catch(() => {});
+  } finally { $("f_save").disabled = $("f_saveProbe").disabled = false; }
 }
 function probeMsg(name, r) {
   $("epMsg").className = "msg " + (r.errors.length ? "err" : "ok");
@@ -503,7 +598,8 @@ function updateEst() {
   const warm = $("warmup").checked ? n : 0;
   const total = n * tasks * r + warm;
   $("selcount").textContent = `已选 ${n} 个`; $("speedBox").classList.toggle("hidden", !chosenSc.has("speed"));
-  $("est").textContent = total ? `预定最多 ${total} 次请求${warm ? `（含 ${warm} 次预热）` : ""}，不含连接重试；耗时与费用取决于接口及输出` : "";
+  $("mtBankBox").classList.toggle("hidden", !chosenSc.has("modeltrace"));
+  $("est").textContent = total ? `预定最多 ${total} 次请求${warm ? `（含 ${warm} 次预热）` : ""}；耗时与费用取决于接口及输出${chosenSc.has("modeltrace_enroll") && r !== 1 ? "；参考采集须设为 1 轮" : ""}` : "";
 }
 function saveSel() { store.set("sel", [...selected]); store.set("sc", [...chosenSc]); }
 function savePrm() { store.set("prm", {prompt: $("prompt").value, context: $("context").value, rounds: $("rounds").value, timeout: $("timeout").value, gap: $("gap").value, concurrency: $("concurrency").value, seed: $("seed").value, connectionMode: $("connectionMode").value, warmup: $("warmup").checked, effort: $("effort").value, useName: $("useName").checked, runName: $("runName").value}); }
@@ -556,7 +652,7 @@ async function start() {
   validSelected().forEach(k => { const [id, m] = k.split(SEP); (by[id] = by[id] || []).push(m); });
   try {
     await api("/api/run", {selection: Object.entries(by).map(([endpoint, models]) => ({endpoint, models})), scenarios: [...chosenSc], prompt: $("prompt").value,
-      rounds: +$("rounds").value, timeout: +$("timeout").value, context: +$("context").value, gap: +$("gap").value, concurrency: +$("concurrency").value, seed: $("seed").value === "" ? null : +$("seed").value, connection_mode: $("connectionMode").value, warmup: $("warmup").checked, name: runName, effort: $("effort").value});
+      rounds: +$("rounds").value, timeout: +$("timeout").value, context: +$("context").value, gap: +$("gap").value, concurrency: +$("concurrency").value, seed: $("seed").value === "" ? null : +$("seed").value, connection_mode: $("connectionMode").value, warmup: $("warmup").checked, name: runName, effort: $("effort").value, modeltrace_bank: $("mtBank").value || "builtin"});
   } catch (e) { $("runErr").textContent = e.message; return; }
   savePrm(); lastSig = ""; setRunning(true); tab("result"); polling = setInterval(poll, 800); poll();
 }
@@ -622,6 +718,31 @@ function fpPanel(fp) {
 }
 const MT_LIMITATION = "候选权重只在参考库范围内比较，不是身份真实性概率；未知模型也会被分配到已有候选。Claude 参考样本来自第三方接口，不能单凭本结果判断是否替换模型。";
 let mtManualChallenges = [];
+async function loadBanks(preferred) {
+  const data = await api("/api/modeltrace/banks"), banks = data.banks || [];
+  const selectedBank = preferred || store.get("mtBank", "builtin");
+  const options = banks.map(b => `<option value="${esc(b.id)}">${esc(b.name)} · ${b.model_count} 个候选 · ${esc(b.sha256.slice(0, 12))}</option>`).join("");
+  for (const id of ["mtBank", "mtManualBank"]) $(id).innerHTML = options;
+  setBank(banks.some(b => b.id === selectedBank) ? selectedBank : "builtin");
+}
+function setBank(id) {
+  $("mtBank").value = id; $("mtManualBank").value = id; store.set("mtBank", id);
+}
+async function importBank() {
+  const file = $("mtBankFile").files[0];
+  if (!file) { $("mtBankMsg").textContent = "请先选择参考库 JSON 文件。"; return; }
+  if (file.size > 4000000) { $("mtBankMsg").textContent = "文件超过 4 MB，无法导入。"; return; }
+  $("mtImportBank").disabled = true; $("mtBankMsg").textContent = "正在校验参考库…";
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer()), chunks = [];
+    for (let i = 0; i < bytes.length; i += 32768) chunks.push(String.fromCharCode(...bytes.subarray(i, i + 32768)));
+    const result = await api("/api/modeltrace/banks", {bank_base64: btoa(chunks.join(""))});  // 保留原文件字节及哈希
+    await loadBanks(result.bank.id);
+    $("mtBankMsg").textContent = `已导入 ${result.bank.model_count} 个候选，SHA-256 ${result.bank.sha256}。来源真实性需自行核实。`;
+    $("mtBankFile").value = "";
+  } catch (e) { $("mtBankMsg").textContent = "导入失败：" + e.message; }
+  finally { $("mtImportBank").disabled = false; }
+}
 function mtResultHtml(result, title) {
   const counts = (result.diagnostics || []).map((d, i) => `挑战 ${i + 1}：${d.parsed_numbers}/${d.minimum_numbers} 个有效数字${d.accepted ? "" : "（未计入）"}`).join(" · ");
   let html = `<div class="identity-results"><b>${esc(title)}</b><div class="identity-stats"><span class="tag">有效回答 ${result.used_outputs}/3</span><span class="tag">参考库 ${esc((result.bank_built_at || "").slice(0, 10))}</span></div><div class="mute">${esc(counts)}</div>`;
@@ -630,11 +751,12 @@ function mtResultHtml(result, title) {
     return html + `<div class="warnbox">${why}；本轮不显示候选排名。</div></div>`;
   }
   const families = (result.family_probabilities || []).map(f => `${esc(f.display_name)} ${pf(f.probability)}`).join(" · ");
-  html += `<div class="identity-limit" style="margin:14px 0">${esc(MT_LIMITATION)}</div><div class="mute">家族候选权重：${families}</div>`;
+  html += `<div class="identity-limit" style="margin:14px 0">${esc(result.limitation || MT_LIMITATION)}</div><div class="mute">家族候选权重：${families}</div>`;
+  if (result.calibration?.fallback || result.calibration?.cv_samples === 0) html += `<div class="warnbox">三题权重未在当前参考数据上完成交叉验证校准，请谨慎解读相对权重。</div>`;
   const rows = result.results.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.display_name)}</td><td>${esc(r.family_name)}</td><td>${(r.probability * 100).toFixed(1)}%</td><td>${r.profile_similarity.toFixed(3)}</td></tr>`);
   html += `<div style="overflow:auto"><table class="identity-candidates"><tr><th>排名</th><th>候选模型</th><th>家族</th><th>闭集相对权重</th><th>分布相似度</th></tr>${rows.slice(0, 5).join("")}</table></div>`;
   if (rows.length > 5) html += `<details><summary>查看全部 ${rows.length} 个候选</summary><div style="overflow:auto"><table class="identity-candidates"><tr><th>排名</th><th>候选模型</th><th>家族</th><th>闭集相对权重</th><th>分布相似度</th></tr>${rows.join("")}</table></div></details>`;
-  return html + `<div class="mute" style="margin-top:12px;font-size:11px;word-break:break-all">ModelTrace ${esc(result.upstream_commit)} · 参考库 SHA-256 ${esc(result.bank_sha256)}</div></div>`;
+  return html + `<div class="mute" style="margin-top:12px;font-size:11px;word-break:break-all">${result.bank_source === "local" ? "用户导入参考库" : `ModelTrace ${esc(result.upstream_commit || "")}`} · 参考库 SHA-256 ${esc(result.bank_sha256)}</div></div>`;
 }
 function mtPanel(results, pairs, active) {
   $("mtPanel").classList.toggle("hidden", !active);
@@ -683,7 +805,7 @@ async function analyzeManual() {
   $("mtAnalyze").disabled = true; $("mtManualMsg").textContent = "正在分析…";
   try {
     const outputs = mtManualChallenges.map((c, i) => ({text: $("mtAnswer" + i).value, expected_count: c.expected_count}));
-    const result = await api("/api/modeltrace/analyze", {outputs});
+    const result = await api("/api/modeltrace/analyze", {outputs, bank_id: $("mtManualBank").value || "builtin"});
     $("mtManualResult").innerHTML = `<div class="panel">${mtResultHtml(result, "手动分析结果")}</div>`;
     $("mtManualMsg").textContent = "分析完成";
   } catch (e) { $("mtManualMsg").textContent = "分析失败：" + e.message; }
@@ -694,7 +816,10 @@ function show(data, title) {
   view = data; $("empty").classList.add("hidden"); $("result").classList.remove("hidden");
   $("resTitle").textContent = title;
   $("resDl").classList.toggle("hidden", !data.id);
+  const hasReference = !!data.id && data.records.some(r => r.scenario === "modeltrace_enroll");
+  $("refDl").classList.toggle("hidden", !hasReference);
   if (data.id) $("resDl").href = "/raw/" + encodeURIComponent(data.id) + ".json";
+  if (hasReference) $("refDl").href = "/reference/" + encodeURIComponent(data.id) + ".jsonl";
   const oldMethod = data.env && !data.env.method_version;
   $("concl").textContent = (oldMethod ? "历史结果使用旧版测量与判定口径；以下为原始结论，不代表当前方法验证。\n" : "") + (data.conclusion || "测试进行中…");
   const scs = [...new Set(data.rows.map(r => r.scenario))];
@@ -718,6 +843,10 @@ function sampleHint(rows) {
   const bad = rows.filter(r => r.low_sample || r.low_ok_sample), box = $("sampleHint");
   box.classList.toggle("hidden", !bad.length);
   if (!bad.length) return;
+  if (viewSc === "modeltrace_enroll") {
+    box.innerHTML = `<b>采集样本不足</b><div>本场景每次固定 1 轮，请检查失败原因并重新采集；导出记录会保留失败及有效性标记。</div>`;
+    return;
+  }
   const t = (cfg.tasks_per_scenario && cfg.tasks_per_scenario[viewSc]) || 1, suggest = Math.min(cfg.max_rounds || 10, Math.max(5, Math.ceil(8 / t)));  // 每个模型约 8 个请求，留余量应对少量失败
   const lines = bad.map(r => r.low_sample ? `• ${esc(r.label)}：只有 ${r.n} 个请求（至少要 5 个）` : `• ${esc(r.label)}：${r.n} 个请求里只有 ${r.ok} 个成功（耗时只统计成功请求，至少要 5 个）`);
   box.innerHTML = `<b>⚠ 样本不足：下面的耗时、排名先别当结论</b><div>${lines.join("<br>")}</div>
@@ -740,7 +869,8 @@ function cards(rows) {
     return `<div class="card ${cls}"><b>${esc(r.label)}</b>${sampleTag(r)}${buf ? ' <span class="tag warn" title="响应几乎在最后一刻才一次性到达（中转站攒满后返回），首字不是模型真正的首字">非流式</span>' : ""}
       <div class="big">${graded ? `${r.pass_n}/${r.graded} 答对` : r.ok ? sec(t.median) : "全部失败"}</div>
       <div class="ln">成功 <b>${r.ok}/${r.n}</b>（Wilson 区间 ${ciText(r.ok_ci)}；重复请求可能相关）${graded ? ` · 正确率 <b>${pf(r.pass_rate)}</b>（固定题集描述性结果）` : ""}</div>
-      ${r.slo_rate != null ? `<div class="ln">${r.slo_seconds} 秒内完成${graded ? "且答对" : ""} <b>${r.slo_n}/${r.n}</b> · 含重连耗时中位 ${sec(r.wall_total && r.wall_total.median)} · 重连任务 ${r.retry_n}</div>` : ""}
+      ${r.slo_rate != null ? `<div class="ln">${r.slo_seconds} 秒内完成${graded ? "且答对" : ""} <b>${r.slo_n}/${r.n}</b> · 端到端耗时中位 ${sec(r.wall_total && r.wall_total.median)}${r.retry_n ? ` · 历史重试任务 ${r.retry_n}` : ""}</div>` : ""}
+      ${r.uncertain_delivery_n ? `<div class="ln" style="color:var(--amber)">送达状态未知 ${r.uncertain_delivery_n} 次，未自动重发</div>` : ""}
       ${r.cached_known ? `<div class="ln">提供方报告缓存命中 ${r.cached_hit_n}/${r.cached_known} 个成功请求（未知值不计）</div>` : ""}
       ${r.returned_models && r.returned_models.length ? `<div class="ln">接口报告模型 ${r.returned_models.map(esc).join("、")}（不验证身份）</div>` : ""}
       ${r.chars_per_second ? `<div class="ln">端到端正文字符/秒 ${r.chars_per_second.median}（含等待，质量与语言不同不可直接排名）</div>` : ""}
@@ -874,7 +1004,9 @@ function codes(records) {
 function envBox(env) {
   if (!env) { $("env").textContent = "测试结束保存后显示"; return; }
   const eps = (env.endpoints || []).map(e => `${e.name}（${e.api}，${e.base_url}）`).join("；") || "旧版结果，未记录";
-  const sm = env.sampling, smTxt = sm ? ` · 采样 temperature=${sm.temperature}、输出上限 ${sm.max_tokens} tokens` : "";
+  const sm = env.sampling, distSc = new Set(["modeltrace", "modeltrace_enroll", "behavior"]), scenarios = env.scenarios || [];
+  const hasDist = scenarios.some(s => distSc.has(s)), hasNormal = scenarios.some(s => !distSc.has(s));
+  const smTxt = sm ? ` · ${hasNormal || !hasDist ? `普通场景 temperature=${sm.temperature}，` : ""}${hasDist ? "分布场景 temperature=服务商默认，" : ""}输出上限 ${sm.max_tokens} tokens` : "";
   $("env").innerHTML = `<div>${env.name ? "名称 <b>" + esc(env.name) + "</b> · " : ""}时间 ${esc((env.created || "").replace("T", " "))} · 脚本 v${esc(env.tool_version)} · 轮数 ${env.rounds ?? "-"} · 间隔 ${env.gap_s ?? "-"}s · 并发 ${env.concurrency ?? "未记录"} · 预热 ${env.warmup ? "是" : "否"} · 推理强度 ${esc(env.effort || "未指定")} · 随机种子 ${env.seed ?? "-"}${esc(smTxt)}</div>
     <div>接口 ${esc(eps)}</div><div>冷连接握手（不计入请求耗时）：${esc(JSON.stringify(env.handshake_s || {}))}</div>
     ${env.prompt ? `<div>自定义提示词：${esc(env.prompt.slice(0, 100))}${env.context_tokens ? "（背景约 " + env.context_tokens + " tokens）" : ""}</div>` : ""}
@@ -886,10 +1018,10 @@ function detail(recs) {
   $("detail").innerHTML = `<tr><th>#</th><th>时间</th><th>模型</th><th>题目</th><th>结果</th><th>HTTP</th><th>连接</th><th>响应头后等待</th><th>首个事件</th><th>首字</th><th>生成</th><th>总耗时</th><th>tokens/s</th><th>回答 / 错误</th></tr>` +
     recs.map(r => `<tr><td>${r.seq || ""}</td><td>${esc((r.time || "").slice(11))}</td><td>${esc(r.label || r.model)}</td><td>${esc(r.task_name || "")}</td>
       <td class="${r.ok ? (r.pass === false ? "err" : "ok") : "err"}">${r.ok ? (r.pass === false ? "答错" : r.pass ? "答对" : "成功") : "失败"}</td><td>${esc(r.status ?? "-")}</td>
-      <td>${r.first_reused === false ? "新建" : r.first_reused === true ? "复用" : "未知"}${r.conn_retry ? "<span class='tag warn' title='复用连接失败后换新连接重试；各次尝试见原始记录'>重连</span>" : ""}</td>
+      <td>${r.first_reused === false ? "新建" : r.first_reused === true ? "复用" : "未知"}${r.conn_retry ? "<span class='tag warn' title='历史结果：复用连接失败后曾重试'>重连</span>" : ""}${r.delivery_uncertain ? "<span class='tag warn' title='服务端可能已收到请求，本次未自动重发'>送达未知</span>" : ""}</td>
       <td>${r.queue_s == null ? "-" : sec(r.queue_s)}</td><td>${sec(r.first_event_s)}</td><td>${r.buffered ? "非流式" : sec(r.first_token_s)}</td><td>${r.gen_s == null ? "-" : sec(r.gen_s)}</td><td>${sec(r.total_s)}</td><td>${r.tps ?? r.tps_overall ?? "-"}</td>
       <td style="white-space:normal;min-width:240px">${r.error ? `<span class="err">${esc(r.error.slice(0, 200))}</span> ` : ""}${r.pass === false && r.grade_note ? `<span class="err">${esc(r.grade_note)}</span> ` : ""}${r.text ? `<details data-k="d${r.seq}"><summary>${esc(r.text.slice(0, 40))}…</summary><div style="white-space:pre-wrap">${esc(r.text)}</div></details>` : ""}</td></tr>`).join("");
-  $("detailNote").textContent = "响应头后等待是客户端观测时间，无法单独归因；生成是工具场景第二步耗时。重连表示复用连接失败后重试，原始记录含尝试和端到端耗时。";
+  $("detailNote").textContent = "响应头后等待是客户端观测时间，无法单独归因；生成是工具场景第二步耗时。送达未知表示服务端可能已收到请求，本次未自动重发；历史结果仍可能包含重试记录。";
 }
 /* ---------------- 历史与趋势 ---------------- */
 const idTitle = id => id;
@@ -1215,6 +1347,81 @@ async function openRun(id) {
   location.hash = "run=" + encodeURIComponent(id); tab("result");
 }
 
+/* ---------------- 独立 meow 进程 ---------------- */
+let meowData = null, meowLastEstimate = null;
+function meowInvalidate() {
+  meowLastEstimate = null; $("meowStart").disabled = true;
+  $("meowEstimateMsg").textContent = "参数已变化，请重新估算请求数。";
+}
+function meowPackage() {
+  const [id, version] = $("meowPackage").value.split("|");
+  return meowData?.packages.find(p => p.id === id && p.version === version);
+}
+function meowRenderSelections() {
+  const pkg = meowPackage();
+  const endpoints = (meowData?.endpoints || []).filter(e => e.mode === pkg?.mode && e.credential_saved);
+  $("meowEndpoint").innerHTML = endpoints.length ? endpoints.map(e => `<option value="${esc(e.id)}">${esc(e.name)} · ${esc(e.model || "未填默认模型")}</option>`).join("") : `<option value="">没有匹配且已保存凭据的接口</option>`;
+  $("meowClaimed").innerHTML = pkg?.models?.length ? pkg.models.map(m => `<option value="${esc(m.id)}">${esc(m.name || m.id)}</option>`).join("") : `<option value="">没有候选模型</option>`;
+  $("meowRequest").value = endpoints[0]?.model || "";
+  meowInvalidate();
+}
+function meowConfig() {
+  const pkg = meowPackage();
+  return {port: +$("meowPort").value, package_id: pkg?.id || "", package_version: pkg?.version || "", benchmark_sha256: pkg?.content_sha256 || "",
+          endpoint_id: $("meowEndpoint").value, endpoint_sha256: meowData?.endpoints.find(e => e.id === $("meowEndpoint").value)?.config_sha256 || "", claimed_model: $("meowClaimed").value, request_model: $("meowRequest").value.trim(),
+          tier: $("meowTier").value, workers: +$("meowWorkers").value, retry_budget: +$("meowRetries").value};
+}
+async function meowConnect() {
+  $("meowConnect").disabled = true; $("meowStatus").textContent = "连接中…"; meowInvalidate();
+  try {
+    meowData = await api("/api/meow/status?port=" + encodeURIComponent($("meowPort").value));
+    $("meowPackage").innerHTML = meowData.packages.length ? meowData.packages.map(p => `<option value="${esc(p.id + "|" + p.version)}">${esc(p.name || p.id)} · ${esc(p.version)} · ${esc(p.mode)} · ${esc(p.publisher)}</option>`).join("") : `<option value="">尚未安装基准包</option>`;
+    $("meowSetup").classList.remove("hidden"); $("meowStatus").textContent = `已连接 meow ${meowData.version || ""}；${meowData.packages.length} 个基准包`;
+    meowRenderSelections();
+  } catch (e) { meowData = null; $("meowSetup").classList.add("hidden"); $("meowStatus").textContent = "连接失败：" + e.message; }
+  finally { $("meowConnect").disabled = false; }
+}
+async function meowEstimate() {
+  const config = meowConfig(), signature = JSON.stringify(config);
+  $("meowEstimate").disabled = true; meowInvalidate(); $("meowEstimateMsg").textContent = "正在估算…";
+  try {
+    const estimate = await api("/api/meow/estimate", config);
+    if (signature !== JSON.stringify(meowConfig())) return;
+    meowLastEstimate = {signature, estimate}; $("meowStart").disabled = false;
+    $("meowEstimateMsg").textContent = `计划 ${estimate.logical_requests} 次请求，含重试最多 ${estimate.maximum_http_attempts} 次；具体费用由接口供应商计费。`;
+  } catch (e) { $("meowEstimateMsg").textContent = "估算失败：" + e.message; }
+  finally { $("meowEstimate").disabled = false; }
+}
+async function meowStart() {
+  const config = meowConfig();
+  if (!meowLastEstimate || JSON.stringify(config) !== meowLastEstimate.signature) { meowInvalidate(); return; }
+  const expected = meowLastEstimate.estimate.maximum_http_attempts;
+  $("meowStart").disabled = true; $("meowReportMsg").textContent = "正在启动独立检测…";
+  try {
+    const result = await api("/api/meow/start", {...config, expected_max_http_attempts: expected});
+    $("meowSession").value = result.session_id; meowLastEstimate = null;
+    $("meowReportMsg").textContent = "已启动，可随时刷新报告或停止。";
+    await meowRefresh();
+  } catch (e) { $("meowReportMsg").textContent = "启动失败：" + e.message; }
+}
+async function meowRefresh() {
+  $("meowRefresh").disabled = true;
+  try {
+    const report = await api(`/api/meow/report?port=${encodeURIComponent($("meowPort").value)}&session_id=${encodeURIComponent($("meowSession").value.trim())}`);
+    const fp = report.fingerprint || {}, progress = report.progress || {}, benchmark = report.benchmark || {};
+    const verdict = {match:"meow：指向申报模型", mismatch:"meow：指向其他候选", insufficient:"meow：证据不足"}[fp.verdict] || "meow：等待结果";
+    $("meowReport").innerHTML = `<div class="identity-results"><b>${esc(verdict)}</b><div class="identity-stats"><span class="tag">${esc(report.operational_status || "未知状态")}</span><span class="tag">有效 ${esc(progress.valid_samples ?? 0)}/${esc(progress.planned ?? "—")}</span></div><div class="mute">基准 ${esc(benchmark.id || "—")} · ${esc(benchmark.version || "—")} · ${esc(benchmark.publisher || "—")}</div><div class="mute" style="word-break:break-all">SHA-256 ${esc(benchmark.content_sha256 || "未记录")}</div><div class="identity-limit" style="margin-top:10px">该结果由独立 meow 基于其基准计算；不能单凭它认证模型身份。完整数据请在 meow 中查看。</div><details><summary>查看摘要</summary><pre id="meowReportJson" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details></div>`;
+    $("meowReportJson").textContent = JSON.stringify(report, null, 2); $("meowReportMsg").textContent = "报告摘要已更新。";
+  } catch (e) { $("meowReportMsg").textContent = "读取失败：" + e.message; }
+  finally { $("meowRefresh").disabled = false; }
+}
+async function meowStop() {
+  $("meowStop").disabled = true;
+  try { await api("/api/meow/stop", {port: +$("meowPort").value, session_id: $("meowSession").value.trim()}); $("meowReportMsg").textContent = "已请求停止，可刷新报告查看最终状态。"; }
+  catch (e) { $("meowReportMsg").textContent = "停止请求失败：" + e.message; }
+  finally { $("meowStop").disabled = false; }
+}
+
 /* ---------------- 自检 ---------------- */
 $("stRun").onclick = async () => {
   $("stRun").disabled = true; $("stOut").innerHTML = "<span class='mute'>运行中，约 10 秒…</span>";
@@ -1228,9 +1435,21 @@ $("stRun").onclick = async () => {
 
 /* ---------------- 初始化 ---------------- */
 PRESETS.forEach(p => { const b = document.createElement("button"); b.className = "ghost sm"; b.textContent = p.length > 12 ? p.slice(0, 12) + "…" : p; b.title = p; b.onclick = () => { $("prompt").value = p; savePrm(); }; $("presets").appendChild(b); });
-$("addEp").onclick = () => showForm(null); $("f_cancel").onclick = () => $("epForm").classList.add("hidden"); $("f_save").onclick = saveEp;
+$("addEp").onclick = () => showForm(null); $("f_cancel").onclick = () => $("epForm").classList.add("hidden");
+$("f_save").onclick = () => saveEp(false); $("f_saveProbe").onclick = () => saveEp(true);
+$("f_clear_key").onchange = () => { if ($("f_clear_key").checked) $("f_key").value = ""; $("f_key").disabled = $("f_clear_key").checked; };
+$("f_api").onchange = () => { if (suggestedEndpoint && $("f_url").value === suggestedEndpoint) $("f_url").value = ""; suggestedEndpoint = ""; syncEndpointForm(true); };
+$("f_auth_mode").onchange = () => syncEndpointForm();
+$("f_url").oninput = () => { if ($("f_url").value !== suggestedEndpoint) suggestedEndpoint = ""; };
+$("f_aws_region").oninput = () => { const region = $("f_aws_region").value.trim(); if (suggestedEndpoint && $("f_api").value === "bedrock" && /^[a-z]{2}(?:-[a-z0-9]+){1,4}-[0-9]+$/.test(region)) { suggestedEndpoint = `https://bedrock-runtime.${region}.amazonaws.com${region.startsWith("cn-") ? ".cn" : ""}`; $("f_url").value = suggestedEndpoint; } };
 $("mtNew").onclick = () => { if ([...document.querySelectorAll("[data-mt-answer]")].some(x => x.value.trim()) && !confirm("生成新题目会清空当前回答，继续吗？")) return; loadManualChallenges(); };
 $("mtAnalyze").onclick = analyzeManual;
+$("mtBank").onchange = () => setBank($("mtBank").value); $("mtManualBank").onchange = () => setBank($("mtManualBank").value);
+$("mtImportBank").onclick = importBank;
+$("meowConnect").onclick = meowConnect; $("meowEstimate").onclick = meowEstimate; $("meowStart").onclick = meowStart; $("meowRefresh").onclick = meowRefresh; $("meowStop").onclick = meowStop;
+$("meowPackage").onchange = meowRenderSelections;
+$("meowEndpoint").onchange = () => { $("meowRequest").value = meowData?.endpoints.find(e => e.id === $("meowEndpoint").value)?.model || ""; meowInvalidate(); };
+["meowPort", "meowClaimed", "meowRequest", "meowTier", "meowWorkers", "meowRetries"].forEach(id => $(id).oninput = meowInvalidate);
 $("impEp").onclick = async () => { try { const r = await api("/api/endpoints/import", {}); await loadEndpoints(); $("epMsg").className = "msg ok"; $("epMsg").textContent = `已导入 ${r.imported} 个供应商；接口类型为“自动”的请点“探测模型”确认。`; } catch (e) { $("epMsg").className = "msg err"; $("epMsg").textContent = e.message; } };
 $("run").onclick = start; $("stop").onclick = () => api("/api/stop", {});
 $("mfilter").oninput = renderModels; $("trendSc").onchange = () => { trendConds(); trend(); }; $("trendCond").onchange = trend; $("cmpBtn").onclick = compareRuns; $("mergeBtn").onclick = mergeRuns;
@@ -1256,6 +1475,7 @@ $("lanCopy").onclick = async () => {
   $("useName").checked = !!prm.useName; $("runName").value = prm.runName || ""; nameUi();
   selected = new Set(store.get("sel", [])); chosenSc = new Set(store.get("sc", ["speed"]));
   renderScen();
+  try { await loadBanks(); } catch (e) { $("mtBankMsg").textContent = "读取参考库失败：" + e.message; }
   try { await loadEndpoints(); } catch (e) { $("eps").textContent = "读取接口失败：" + e.message; }
   updateEst();
   await loadHistory().catch(() => {});

@@ -22,9 +22,17 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # 项目零依赖（只用标准库），不需要 pip install
+      # 先用纯标准库验证常规运行，再单独验证需要 NumPy 的可选训练器。
       - name: 单元测试与集成测试（使用本机假服务）
         run: python3 -m model_test test
+
+      - name: 安装参考库训练测试依赖
+        run: python3 -m pip install 'numpy>=1.26,<3'
+
+      - name: 参考库训练与留出评估（合成样本）
+        env:
+          OPENBLAS_NUM_THREADS: "1"
+        run: python3 -m unittest tests.test_reference_training -v
 
       - name: 仪器自检（验证平台测时间/分类状态码是否准）
         run: python3 -m model_test selftest

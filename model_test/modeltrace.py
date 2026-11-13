@@ -145,9 +145,9 @@ def _obvious_pattern(numbers):
                >= math.ceil((len(numbers) - period) * 0.85) for period in range(1, 9))
 
 
-def analyze_outputs(outputs):
+def analyze_outputs(outputs, artifact=None):
     """每个输出为 {text, expected_count, ok?}；不足三份有效结果时不出候选。"""
-    artifact = load_bank()
+    artifact = artifact or load_bank()
     bank = artifact["bank"]
     valid, sequences, diagnostics = [], [], []
     for index, item in enumerate(outputs):
@@ -163,8 +163,9 @@ def analyze_outputs(outputs):
     result = {"status": "insufficient", "used_outputs": len(valid), "required_outputs": MIN_OUTPUTS,
               "diagnostics": diagnostics, "results": [], "family_probabilities": [],
               "bank_sha256": artifact["sha256"], "bank_built_at": bank.get("built_at"),
-              "upstream_commit": UPSTREAM_COMMIT,
-              "limitation": "候选仅覆盖参考库内模型；分数不是身份真实性概率，不能证明是否替换模型。Claude 参考样本来自第三方接口。"}
+              "upstream_commit": artifact.get("upstream_commit", UPSTREAM_COMMIT), "bank_source": artifact.get("source", "upstream"),
+              "limitation": ("候选仅覆盖参考库内模型；分数不是身份真实性概率，不能证明是否替换模型。"
+                             + ("Claude 参考样本来自第三方接口。" if artifact.get("source", "upstream") == "upstream" else "用户导入参考库的来源与真实性未验证。"))}
     if len(valid) < MIN_OUTPUTS:
         result["reason"] = "too_few_valid"
         return result
@@ -225,7 +226,7 @@ def challenges(seed, round_no=1):
             for i, count in enumerate(counts)]
 
 
-def analyze_records(records):
+def analyze_records(records, artifact=None):
     """每个模型、每轮独立评分；不能把不同轮次的残缺答案凑成一组。"""
     groups = {}
     for rec in records:
@@ -236,7 +237,7 @@ def analyze_records(records):
     results = []
     for (label, round_no), items in groups.items():
         outputs = [items.get(f"mt{i}", {"ok": False, "text": ""}) for i in range(1, 4)]
-        result = analyze_outputs(outputs)
+        result = analyze_outputs(outputs, artifact=artifact)
         result.update(label=label, round=round_no)
         results.append(result)
     return sorted(results, key=lambda item: (item["label"] or "", item["round"] or 0))

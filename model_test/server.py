@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""模型测试平台（本机网页）：添加任意 OpenAI 兼容接口（地址 + 密钥），探测模型列表，选模型和场景，测完在右侧看数据。
+"""模型测试平台（本机网页）：直接添加兼容的云端或本地模型接口，按需探测并运行测试。
 
 用法：python3 -m model_test serve [--port 18888] [--open]    或    ./start.sh（在 ModelBench 目录下）
 然后打开 http://127.0.0.1:18888
@@ -8,7 +8,7 @@
 - 监听地址和端口见 config.json（默认只绑 127.0.0.1；需要远程组网访问时自行在 bind_hosts 追加）；检查 Host 和 Origin，POST 必须是 JSON，防止别的网站借浏览器触发测试。
 - 接口信息（含密钥）存在 data/endpoints.json（权限 600），不发给页面；每次测试结果存在 results/<日期>-<次数>/，不含密钥。
 - 页面只能触发固定操作；参数全部白名单校验；一次只跑一个任务；测试期间不允许探测/自检（避免干扰测量）。
-- 不改 OpenClaw 配置（“导入”只读取它），不经过网关，不影响微信用户。
+- 可选的历史迁移只读取 OpenClaw 配置；平台自身不依赖该软件。
 """
 import argparse
 import base64
@@ -23,7 +23,7 @@ import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import config, core, modeltrace, selftest, store
+from . import banks, config, core, meow_bridge, modeltrace, selftest, store
 
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "dashboard.html")
 _L = config.CFG["limits"]
@@ -164,7 +164,10 @@ def validate(body):
     prompt = body.get("prompt", "")
     if "speed" in scen and (not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_PROMPT):
         raise ValueError(f"自定义提示词不能为空，最多 {MAX_PROMPT} 字")
-    sel_in, selection = body.get("selection"), []
+    saved_endpoints = store.list_endpoints(public=False)
+    if "speed" in scen and any(core.redact_text(prompt, ep.get("api_key")) != prompt for ep in saved_endpoints):
+        raise ValueError("提示词包含已保存的接口密钥，请移除后再测试")
+    sel_in, selection, selected_apis = body.get("selection"), [], set()
     if not isinstance(sel_in, list):
         raise ValueError("请选择要测试的模型")
     for s in sel_in:
@@ -175,13 +178,26 @@ def validate(body):
         if not isinstance(ms, list) or any(not isinstance(m, str) or m not in ep["models"] for m in ms):
             raise ValueError(f"接口“{ep['name']}”的模型必须在它已保存的模型列表里")
         if ms:
-            store.effective_api(ep)
+            api = store.effective_api(ep)
+            selected_apis.add(api)
+            if api == "gemini":
+                for model in ms:
+                    core.gemini.request_path(ep["base_url"], model)
+            if api == "azure":
+                for model in ms:
+                    core.azure.request_path(ep["base_url"], model, ep.get("azure_api_version", core.azure.DEFAULT_API_VERSION))
+            if api == "bedrock":
+                core.bedrock.validate_settings(ep.get("aws_region", core.bedrock.DEFAULT_REGION), ep.get("aws_profile", ""), ep["base_url"])
+                for model in ms:
+                    core.bedrock.request_path(ep["base_url"], model)
             selection.append({"endpoint": ep["id"], "models": list(dict.fromkeys(ms))})
     if not selection:
         raise ValueError("请选择要测试的模型")
     rounds, timeout, context, gap = body.get("rounds"), body.get("timeout"), body.get("context", 0), body.get("gap", 1.5)
     if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= MAX_ROUNDS:
         raise ValueError(f"轮数范围 1–{MAX_ROUNDS}")
+    if "modeltrace_enroll" in scen and rounds != 1:
+        raise ValueError("参考库采集每次限 1 轮，避免相同挑战重复混入训练")
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 10 <= timeout <= MAX_TIMEOUT:
         raise ValueError(f"超时范围 10–{MAX_TIMEOUT} 秒")
     if context not in core.CONTEXT_CHOICES:
@@ -191,13 +207,20 @@ def validate(body):
     name = body.get("name") or ""
     if name and (not isinstance(name, str) or not store.NAME_RE.match(name.strip())):
         raise ValueError("测试名称只能含中文、字母、数字、- 和 _，最长 30 字")
+    if any(core.redact_text(name, ep.get("api_key")) != name for ep in saved_endpoints):
+        raise ValueError("测试名称不能包含已保存的密钥")
     effort = body.get("effort", "")
     if effort not in core.EFFORTS:
         raise ValueError("推理强度只能是 不指定 / low / medium / high")
-    if ("modeltrace" in scen or "behavior" in scen) and effort:
+    if effort and selected_apis.intersection(("gemini", "bedrock")):
+        raise ValueError("Gemini/Bedrock 原生接口暂不支持统一推理强度参数，请设为不指定")
+    if any(s in scen for s in ("modeltrace", "modeltrace_enroll", "behavior")) and effort:
         raise ValueError("模型分布测试使用默认推理设置；请将推理强度设为不指定")
+    bank_id = body.get("modeltrace_bank", "builtin")
+    if not isinstance(bank_id, str):
+        raise ValueError("参考库 ID 无效")
     if "modeltrace" in scen:
-        modeltrace.load_bank()  # 先验证本地参考库，再允许启动可能计费的请求。
+        banks.load_bank(store.DATA_DIR, bank_id)  # 启动可能计费的请求之前先验证库。
     concurrency = body.get("concurrency", 1)
     if not isinstance(concurrency, int) or isinstance(concurrency, bool) or not 1 <= concurrency <= 4:
         raise ValueError("并发范围 1–4")
@@ -211,10 +234,19 @@ def validate(body):
     n = rounds * sum(len(s["models"]) for s in selection) * sum(2 if t["kind"] == "tool" else 1 for t in tasks)
     n += sum(len(s["models"]) for s in selection) if body.get("warmup", True) is not False else 0
     if n > MAX_REQUESTS:
-        raise ValueError(f"一次最多 {MAX_REQUESTS} 个预定请求（含预热与工具两步，不含连接重试），当前 {n}")
+        raise ValueError(f"一次最多 {MAX_REQUESTS} 个预定请求（含预热与工具两步），当前 {n}")
     return {"selection": selection, "scenarios": scen, "prompt": (prompt or "").strip(), "rounds": rounds, "timeout": timeout,
             "context": context, "gap": float(gap), "name": name.strip(), "effort": effort, "warmup": body.get("warmup", True) is not False,
-            "concurrency": concurrency, "connection_mode": connection_mode, "seed": seed}
+            "concurrency": concurrency, "connection_mode": connection_mode, "seed": seed, "modeltrace_bank": bank_id}
+
+
+def _redact_external(value, secret):
+    """独立程序返回的数据连同动态字典键一起脱敏。"""
+    if isinstance(value, dict):
+        return {core.redact_text(k, secret) if isinstance(k, str) else k: _redact_external(v, secret) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_external(v, secret) for v in value]
+    return core.redact_text(value, secret) if isinstance(value, str) else value
 
 
 def public_config():
@@ -299,6 +331,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, public_config())
             if path == "/api/modeltrace/challenges":
                 return self._send(200, {"challenges": modeltrace.challenges(secrets.randbits(31))})
+            if path == "/api/modeltrace/banks":
+                return self._send(200, {"banks": banks.list_banks(store.DATA_DIR)})
+            if path in ("/api/meow/status", "/api/meow/report"):
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                port = int(query.get("port", [""])[0])
+                data = meow_bridge.status(port) if path.endswith("status") else meow_bridge.report(port, query.get("session_id", [""])[0])
+                for ep in store.list_endpoints(public=False):
+                    data = _redact_external(data, ep.get("api_key"))
+                return self._send(200, data)
             if path == "/api/endpoints":
                 return self._send(200, {"endpoints": store.list_endpoints()})
             if path == "/api/job":
@@ -315,6 +356,12 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/api/run/([^/]+)$", upath)
             if m:
                 return self._send(200, store.load_run(m.group(1)))
+            m = re.match(r"^/reference/([^/]+)\.jsonl$", upath)
+            if m:
+                rows = store.export_reference_rows(m.group(1))
+                payload = ("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n").encode("utf-8")
+                return self._send(200, payload, "application/x-ndjson; charset=utf-8",
+                                  {"Content-Disposition": 'attachment; filename="modeltrace-reference.jsonl"'})
             m = re.match(r"^/raw/([^/]+)\.json$", upath)
             if m:
                 with open(store.raw_path(m.group(1)), "rb") as f:
@@ -323,6 +370,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "not found"})
         except FileNotFoundError:
             return self._send(404, {"error": "not found"})
+        except ValueError as e:
+            return self._send(400, {"error": str(e)})
         except Exception as e:  # noqa: BLE001
             return self._send(500, {"error": f"{type(e).__name__}: {e}"})
 
@@ -334,7 +383,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            if length > MAX_BODY:
+            limit = banks.MAX_BANK_BYTES * 2 + 4096 if path == "/api/modeltrace/banks" else MAX_BODY
+            if length < 0 or length > limit:
                 return self._send(413, {"error": "请求太大"})
             body = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(body, dict):
@@ -379,8 +429,38 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     lan_stop()
                     info = lan_info()
-                info["warning"] = ("页面没有登录，同网段任何人拿到这个地址都能使用你保存的接口密钥。" if want else None)
+                info["warning"] = ("页面没有登录，拿到地址的人可以使用已保存的接口密钥及本机 AWS 环境或 Profile 凭据。" if want else None)
                 return self._send(200, info)
+            if path in ("/api/meow/estimate", "/api/meow/start", "/api/meow/stop"):
+                if path == "/api/meow/start" and running():
+                    return self._send(409, {"error": "ModelBench 测试进行中，请稍后启动独立检测"})
+                for ep in store.list_endpoints(public=False):
+                    if core._redact_value(body, ep.get("api_key")) != body:
+                        raise ValueError("参数包含 ModelBench 已保存的密钥，请移除")
+                if path == "/api/meow/estimate":
+                    data = meow_bridge.estimate(body)
+                elif path == "/api/meow/start":
+                    data = meow_bridge.start(body)
+                else:
+                    data = meow_bridge.stop(body.get("port"), body.get("session_id"))
+                return self._send(200, data)
+            if path == "/api/modeltrace/banks":
+                if isinstance(body.get("bank_base64"), str):
+                    try:
+                        raw = base64.b64decode(body["bank_base64"], validate=True)
+                    except (ValueError, UnicodeEncodeError) as exc:
+                        raise ValueError("参考库文件编码无效") from exc
+                elif isinstance(body.get("bank_json"), str):
+                    try:
+                        raw = body["bank_json"].encode("utf-8")
+                    except UnicodeEncodeError as exc:
+                        raise ValueError("参考库不是有效 UTF-8") from exc
+                elif isinstance(body.get("bank"), dict):
+                    raw = json.dumps(body["bank"], ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+                else:
+                    raise ValueError("请选择 ModelTrace 参考库 JSON")
+                known_secrets = [ep.get("api_key") for ep in store.list_endpoints(public=False)]
+                return self._send(200, {"bank": banks.import_bank(store.DATA_DIR, raw, known_secrets)})
             if path == "/api/modeltrace/analyze":
                 outputs = body.get("outputs")
                 if not isinstance(outputs, list) or len(outputs) > 3 or any(
@@ -389,7 +469,8 @@ class Handler(BaseHTTPRequestHandler):
                     or not 0 <= item.get("expected_count", 0) <= 1000 for item in outputs
                 ):
                     raise ValueError("最多输入三份回答，每份不超过 20000 字符，数量须为 0–1000 的整数")
-                return self._send(200, modeltrace.analyze_outputs(outputs))
+                artifact = banks.load_bank(store.DATA_DIR, body.get("bank_id", "builtin"))
+                return self._send(200, modeltrace.analyze_outputs(outputs, artifact=artifact))
             if path == "/api/merge":
                 ids = body.get("ids")
                 if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
